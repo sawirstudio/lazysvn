@@ -96,3 +96,11 @@ with `goreleaser release --snapshot --clean`.
 - `q` or `ctrl+c`: quit (`ctrl+c` works inside prompts too)
 
 Only one working-copy-changing command (`update`, `add`, `revert`, `commit`) runs at a time; other svn commands wait until it finishes.
+
+## More from Sawir Studio
+
+lazysvn is made by [Sawir Studio LLC](https://sawirstudio.com/?utm_source=lazysvn&utm_medium=referral), which also makes
+[Sawirly](https://sawirly.com/?utm_source=lazysvn&utm_medium=referral) (a privacy-first URL shortener),
+[SawirPost](https://sawirpost.com/?utm_source=lazysvn&utm_medium=referral) (publish one post to 25+ social channels),
+[Rindraw](https://rindraw.com/?utm_source=lazysvn&utm_medium=referral) (drawing with editable strokes for iPad, iPhone and Mac)
+and [more](https://sawirstudio.com/projects/?utm_source=lazysvn&utm_medium=referral).

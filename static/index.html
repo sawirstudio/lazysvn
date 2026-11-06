@@ -215,6 +215,12 @@ kbd { color: var(--yellow); }
 dl.keys { display: grid; grid-template-columns: max-content 1fr; gap: 2px 3ch; margin: 0; max-width: 72ch; }
 dl.keys dt { color: var(--yellow); white-space: nowrap; }
 dl.keys dd { margin: 0; }
+dl.products dt a { color: var(--yellow); }
+dl.products dt a:hover { color: var(--fg-bright); }
+@media (max-width: 560px) {
+  dl.products { grid-template-columns: 1fr; gap: 0; }
+  dl.products dd { margin-bottom: 8px; color: var(--pane); }
+}
 
 /* ---- install tabs ---------------------------------------------------- */
 .tabs { display: flex; flex-wrap: wrap; gap: 0 4px; border-bottom: 1px solid var(--rule); margin-bottom: 12px; }
@@ -244,7 +250,7 @@ footer.colophon a { color: var(--dim); }
 <header>
   <div class="man-head" aria-hidden="true"><span>LAZYSVN(1)</span><span class="mid">General Commands Manual</span><span>LAZYSVN(1)</span></div>
   <nav class="toc" aria-label="Sections">
-    <a href="#name">name</a><a href="#demo">demo</a><a href="#description">description</a><a href="#keys">keys</a><a href="#install">install</a><a href="#see-also">see also</a><a href="https://github.com/sawirstudio/lazysvn">github</a>
+    <a href="#name">name</a><a href="#demo">demo</a><a href="#description">description</a><a href="#keys">keys</a><a href="#install">install</a><a href="#author">author</a><a href="#see-also">see also</a><a href="https://github.com/sawirstudio/lazysvn">github</a>
   </nav>
 </header>
 
@@ -399,6 +405,22 @@ footer.colophon a { color: var(--dim); }
     </div>
 
     <p class="note" style="margin-top:14px">Then <code>cd</code> into any svn working copy and run <b>lazysvn</b>. Prebuilt archives and <code>checksums.txt</code> for every platform are on the <a href="https://github.com/sawirstudio/lazysvn/releases">releases page</a>.</p>
+  </div>
+</section>
+
+<section id="author">
+  <h2>AUTHOR</h2>
+  <div class="body">
+    <p>Written and maintained by <a href="https://sawirstudio.com/?utm_source=lazysvn&amp;utm_medium=referral">Sawir Studio LLC</a>, a small studio that builds software for clients and ships its own:</p>
+    <dl class="keys products">
+      <dt><a href="https://sawirly.com/?utm_source=lazysvn&amp;utm_medium=referral">sawirly</a></dt><dd>privacy-first URL shortener: no tracking, links that can expire</dd>
+      <dt><a href="https://sawirpost.com/?utm_source=lazysvn&amp;utm_medium=referral">sawirpost</a></dt><dd>write a post once, publish it to 25+ social channels on schedule</dd>
+      <dt><a href="https://rindraw.com/?utm_source=lazysvn&amp;utm_medium=referral">rindraw</a></dt><dd>drawing app where every stroke stays editable; pay once for iPad, iPhone and Mac</dd>
+      <dt><a href="https://apps.apple.com/us/app/par-financial-calculator-rpn/id6824515889">par</a></dt><dd>RPN financial calculator for iPhone and iPad: TVM, NPV, IRR, bonds</dd>
+      <dt><a href="https://apps.apple.com/us/app/cleanstorage-swipe-clean/id6823254083">cleanstorage</a></dt><dd>finds duplicate photos and large videos on your iPhone; no ads, no subscription</dd>
+      <dt><a href="https://getmathdaily.com/?utm_source=lazysvn&amp;utm_medium=referral">math-daily</a></dt><dd>a mental math habit for kids, one minute a day</dd>
+    </dl>
+    <p style="margin-top:10px"><a href="https://sawirstudio.com/projects/?utm_source=lazysvn&amp;utm_medium=referral">all projects</a> · <a href="https://sawirstudio.com/contact/?utm_source=lazysvn&amp;utm_medium=referral">hire us</a></p>
   </div>
 </section>
 
