@@ -309,7 +309,7 @@ function crt() {
 function boot() {
   const el = document.getElementById('boot');
   if (!el) return;
-  const ver = (document.querySelector('.ver') || {}).textContent || '0.4.1';
+  const ver = (document.querySelector('.ver') || {}).textContent || '0.4.2';
   const LINES = [
     ['v', `lazysvn ${ver} - booting`],
     ['ok', 'probing svn client ......... svn 1.15'],
