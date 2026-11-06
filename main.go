@@ -10,134 +10,19 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
-	"sort"
-	"strconv"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
-var hunkHeaderRE = regexp.MustCompile(`^@@ -([0-9]+)(?:,[0-9]+)? \+([0-9]+)(?:,[0-9]+)? @@`)
 var pseudoVersionRE = regexp.MustCompile(`^v\d+\.\d+\.\d+-\d{14}-[0-9a-f]{12,}(?:\+incompatible)?(?:\+dirty)?$`)
 
 // version is set at build time via -ldflags "-X main.version=<value>".
 var version = "dev"
 
-var (
-	diffMetaStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true)
-	diffHunkStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("13")).Bold(true)
-	diffDelStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
-	diffAddStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
-	diffContextStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	diffSepStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	diffHeadStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("14")).Bold(true)
-)
-
-type statusEntry struct {
-	Code rune
-	Path string
-	Raw  string
-}
-
-type statusMsg struct {
-	entries []statusEntry
-	raw     string
-	err     error
-}
-
-type previewMsg struct {
-	title string
-	body  string
-}
-
-type actionMsg struct {
-	title   string
-	body    string
-	refresh bool
-}
-
-type model struct {
-	entries []statusEntry
-	cursor  int
-	marked  map[string]struct{}
-
-	previewTitle string
-	previewBody  string
-	statusLine   string
-
-	width  int
-	height int
-
-	commitPrompt bool
-	commitInput  textinput.Model
-	commitPaths  []string
-
-	revertConfirm bool
-	revertPaths   []string
-}
-
 func main() {
 	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "-h", "--help", "help":
-			fmt.Println(cliHelp())
-			return
-		case "-v", "--version", "version":
-			fmt.Println(currentVersion())
-			return
-		case "update":
-			if len(os.Args) > 3 {
-				fmt.Fprintf(os.Stderr, "too many arguments for update\n\n%s\n", cliHelp())
-				os.Exit(2)
-			}
-			if len(os.Args) == 3 {
-				switch os.Args[2] {
-				case "-h", "--help", "help":
-					fmt.Println(updateHelp())
-					return
-				}
-			}
-
-			version := "latest"
-			if len(os.Args) == 3 {
-				version = strings.TrimSpace(os.Args[2])
-				if version == "" {
-					version = "latest"
-				}
-			}
-
-			if err := runSelfUpdate(version); err != nil {
-				fmt.Fprintf(os.Stderr, "lazysvn update failed: %v\n", err)
-				os.Exit(1)
-			}
-			return
-		case "uninstall":
-			if len(os.Args) > 3 {
-				fmt.Fprintf(os.Stderr, "too many arguments for uninstall\n\n%s\n", cliHelp())
-				os.Exit(2)
-			}
-			if len(os.Args) == 3 {
-				switch os.Args[2] {
-				case "-h", "--help", "help":
-					fmt.Println(uninstallHelp())
-					return
-				default:
-					fmt.Fprintf(os.Stderr, "unknown argument for uninstall: %s\n\n%s\n", os.Args[2], uninstallHelp())
-					os.Exit(2)
-				}
-			}
-
-			if err := runSelfUninstall(); err != nil {
-				fmt.Fprintf(os.Stderr, "lazysvn uninstall failed: %v\n", err)
-				os.Exit(1)
-			}
-			return
-		default:
-			fmt.Fprintf(os.Stderr, "unknown argument: %s\n\n%s\n", os.Args[1], cliHelp())
-			os.Exit(2)
-		}
+		os.Exit(runCLI(os.Args[1:]))
 	}
 
 	p := tea.NewProgram(initialModel(), tea.WithAltScreen())
@@ -147,791 +32,63 @@ func main() {
 	}
 }
 
-func initialModel() model {
-	ti := textinput.New()
-	ti.Placeholder = "Commit message"
-	ti.Prompt = "> "
-	ti.CharLimit = 200
-
-	return model{
-		marked:       map[string]struct{}{},
-		previewTitle: "Help",
-		previewBody:  helpText(),
-		statusLine:   "Loading SVN status...",
-		commitInput:  ti,
-	}
+func isHelpArg(s string) bool {
+	return s == "-h" || s == "--help" || s == "help"
 }
 
-func (m model) Init() tea.Cmd {
-	return fetchStatusCmd()
-}
-
-func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
-		return m, nil
-
-	case statusMsg:
-		if msg.err != nil {
-			m.statusLine = "Failed to run svn status."
-			m.previewTitle = "SVN Error"
-			m.previewBody = formatSVNResult([]string{"status"}, msg.raw, msg.err)
-			return m, nil
-		}
-
-		m.entries = msg.entries
-		m.cleanupMarks()
-		if len(m.entries) == 0 {
-			m.cursor = 0
-			m.statusLine = "Working copy clean."
-		} else {
-			if m.cursor >= len(m.entries) {
-				m.cursor = len(m.entries) - 1
-			}
-			m.statusLine = fmt.Sprintf("%d change(s).", len(m.entries))
-		}
-		return m, nil
-
-	case previewMsg:
-		m.previewTitle = msg.title
-		m.previewBody = msg.body
-		return m, nil
-
-	case actionMsg:
-		m.previewTitle = msg.title
-		m.previewBody = msg.body
-		if strings.Contains(strings.ToLower(msg.body), "error") {
-			m.statusLine = "Action failed."
-		} else {
-			m.statusLine = "Action completed."
-		}
-		if msg.refresh {
-			return m, fetchStatusCmd()
-		}
-		return m, nil
-
-	case tea.KeyMsg:
-		if m.commitPrompt {
-			switch msg.String() {
-			case "esc":
-				m.commitPrompt = false
-				m.commitInput.Blur()
-				m.statusLine = "Commit canceled."
-				return m, nil
-			case "enter":
-				message := strings.TrimSpace(m.commitInput.Value())
-				if message == "" {
-					m.statusLine = "Commit message cannot be empty."
-					return m, nil
-				}
-				paths := append([]string(nil), m.commitPaths...)
-				m.commitPrompt = false
-				m.commitInput.Blur()
-				m.statusLine = "Running svn commit..."
-				return m, commitCmd(paths, message)
-			default:
-				var cmd tea.Cmd
-				m.commitInput, cmd = m.commitInput.Update(msg)
-				return m, cmd
-			}
-		}
-
-		if m.revertConfirm {
-			switch msg.String() {
-			case "y":
-				paths := append([]string(nil), m.revertPaths...)
-				m.revertConfirm = false
-				m.statusLine = "Running svn revert..."
-				return m, revertCmd(paths)
-			case "n", "esc":
-				m.revertConfirm = false
-				m.statusLine = "Revert canceled."
-				return m, nil
-			}
-			return m, nil
-		}
-
-		switch msg.String() {
-		case "ctrl+c", "q":
-			return m, tea.Quit
-		case "up", "k":
-			m.moveCursor(-1)
-			return m, m.maybeFollowDiff()
-		case "down", "j":
-			m.moveCursor(1)
-			return m, m.maybeFollowDiff()
-		case "g", "home":
-			m.cursor = 0
-			return m, m.maybeFollowDiff()
-		case "G", "end":
-			if len(m.entries) > 0 {
-				m.cursor = len(m.entries) - 1
-			}
-			return m, m.maybeFollowDiff()
-		case " ":
-			m.toggleMark()
-			return m, nil
-		case "r":
-			m.statusLine = "Refreshing..."
-			return m, fetchStatusCmd()
-		case "enter", "d":
-			path := m.currentPath()
-			if path == "" {
-				m.statusLine = "No file selected."
-				return m, nil
-			}
-			m.statusLine = "Loading diff..."
-			return m, diffCmd(path)
-		case "l":
-			path := m.currentPath()
-			if path == "" {
-				m.statusLine = "No file selected."
-				return m, nil
-			}
-			m.statusLine = "Loading log..."
-			return m, logCmd(path)
-		case "u":
-			m.statusLine = "Running svn update..."
-			return m, updateCmd()
-		case "a":
-			targets := m.addTargets()
-			if len(targets) == 0 {
-				m.statusLine = "Select unversioned file(s) with status '?'."
-				return m, nil
-			}
-			m.statusLine = "Running svn add..."
-			return m, addCmd(targets)
-		case "v":
-			targets := m.selectedTargets()
-			if len(targets) == 0 {
-				m.statusLine = "No file selected."
-				return m, nil
-			}
-			m.revertConfirm = true
-			m.revertPaths = targets
-			return m, nil
-		case "c":
-			m.commitPaths = m.commitTargets()
-			m.commitPrompt = true
-			m.commitInput.SetValue("")
-			m.commitInput.Focus()
-			m.statusLine = fmt.Sprintf("Commit %d path(s). Enter commit message.", len(m.commitPaths))
-			return m, nil
-		case "h", "?":
-			m.previewTitle = "Help"
-			m.previewBody = helpText()
-			return m, nil
-		}
-	}
-
-	return m, nil
-}
-
-func (m model) View() string {
-	if m.width == 0 || m.height == 0 {
-		return "Loading..."
-	}
-
-	header := lipgloss.NewStyle().Bold(true).Render("LazySVN - SVN TUI")
-	bodyH := m.height - 4
-	if bodyH < 6 {
-		bodyH = 6
-	}
-
-	frameW := paneStyle().GetHorizontalFrameSize()
-	frameH := paneStyle().GetVerticalFrameSize()
-	contentW := max(8, m.width-frameW)
-	body := ""
-
-	// Use a stacked layout in narrower terminals to avoid right-edge clipping.
-	if m.width < 110 {
-		topOuterH := bodyH * 45 / 100
-		if topOuterH < 4 {
-			topOuterH = bodyH / 2
-		}
-		bottomOuterH := bodyH - topOuterH
-		top := m.renderChangesPane(contentW, max(3, topOuterH-frameH))
-		bottom := m.renderPreviewPane(contentW, max(3, bottomOuterH-frameH))
-		body = lipgloss.JoinVertical(lipgloss.Left, top, bottom)
-	} else {
-		leftTotalW := m.width * 45 / 100
-		if leftTotalW < 40 {
-			leftTotalW = m.width / 2
-		}
-		rightTotalW := m.width - leftTotalW
-		left := m.renderChangesPane(max(8, leftTotalW-frameW), max(3, bodyH-frameH))
-		right := m.renderPreviewPane(max(8, rightTotalW-frameW), max(3, bodyH-frameH))
-		body = lipgloss.JoinHorizontal(lipgloss.Top, left, right)
-	}
-
-	footer := m.renderFooter(m.width)
-	return strings.Join([]string{header, body, footer}, "\n")
-}
-
-func paneStyle() lipgloss.Style {
-	return lipgloss.NewStyle().
-		Border(lipgloss.NormalBorder()).
-		Padding(0, 1)
-}
-
-func (m model) renderChangesPane(contentWidth, contentHeight int) string {
-	border := paneStyle().
-		Width(contentWidth).
-		Height(contentHeight)
-
-	innerWidth := max(8, contentWidth)
-	rows := max(1, contentHeight)
-
-	lines := []string{"Changes"}
-	if len(m.entries) == 0 {
-		lines = append(lines, "Working copy clean.")
-		return border.Render(strings.Join(lines, "\n"))
-	}
-
-	start := m.scrollStart(rows - 1)
-	end := min(len(m.entries), start+rows-1)
-	for i := start; i < end; i++ {
-		entry := m.entries[i]
-		cursor := " "
-		if i == m.cursor {
-			cursor = ">"
-		}
-		mark := " "
-		if _, ok := m.marked[entry.Path]; ok {
-			mark = "*"
-		}
-		code := statusCodeStyle(entry.Code).Render(string(entry.Code))
-		line := fmt.Sprintf("%s%s [%s] %s", cursor, mark, code, entry.Path)
-		lines = append(lines, truncate(line, innerWidth))
-	}
-
-	return border.Render(strings.Join(lines, "\n"))
-}
-
-func (m model) renderPreviewPane(contentWidth, contentHeight int) string {
-	border := paneStyle().
-		Width(contentWidth).
-		Height(contentHeight)
-
-	innerWidth := max(8, contentWidth)
-	rows := max(1, contentHeight)
-
-	lines := []string{m.previewTitle}
-	if strings.HasPrefix(m.previewTitle, "Diff:") {
-		lines = append(lines, renderSideBySideDiff(m.previewBody, innerWidth)...)
-	} else {
-		for _, line := range strings.Split(strings.ReplaceAll(m.previewBody, "\r\n", "\n"), "\n") {
-			lines = append(lines, truncate(line, innerWidth))
-		}
-	}
-	if len(lines) > rows {
-		lines = lines[:rows]
-	}
-
-	return border.Render(strings.Join(lines, "\n"))
-}
-
-type diffLine struct {
-	no   int
-	text string
-}
-
-func renderSideBySideDiff(body string, width int) []string {
-	raw := strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n")
-	if len(raw) == 0 {
-		return []string{"(no diff output)"}
-	}
-
-	if strings.HasPrefix(raw[0], "$ svn ") {
-		raw = raw[1:]
-		for len(raw) > 0 && strings.TrimSpace(raw[0]) == "" {
-			raw = raw[1:]
-		}
-	}
-	if len(raw) == 0 {
-		return []string{"(no diff output)"}
-	}
-	if !hasUnifiedHunk(raw) {
-		return colorizeAndTruncateLines(raw, width)
-	}
-
-	separator := " | "
-	leftW := (width - len(separator)) / 2
-	rightW := width - len(separator) - leftW
-	if leftW < 18 || rightW < 18 {
-		return colorizeAndTruncateLines(raw, width)
-	}
-
-	lines := []string{
-		diffHeadStyle.Render(formatDiffRow(leftW, rightW, separator, 0, "OLD", ' ', 0, "NEW", ' ')),
-		diffSepStyle.Render(truncate(strings.Repeat("-", leftW)+separator+strings.Repeat("-", rightW), width)),
-	}
-
-	var oldLine, newLine int
-	var pendingDel []diffLine
-	var pendingAdd []diffLine
-	sawHunk := false
-
-	flush := func() {
-		count := max(len(pendingDel), len(pendingAdd))
-		for i := 0; i < count; i++ {
-			leftNo, leftText, leftSign := 0, "", ' '
-			rightNo, rightText, rightSign := 0, "", ' '
-			if i < len(pendingDel) {
-				leftNo = pendingDel[i].no
-				leftText = pendingDel[i].text
-				leftSign = '-'
-			}
-			if i < len(pendingAdd) {
-				rightNo = pendingAdd[i].no
-				rightText = pendingAdd[i].text
-				rightSign = '+'
-			}
-			lines = append(lines, formatDiffRow(leftW, rightW, separator, leftNo, leftText, leftSign, rightNo, rightText, rightSign))
-		}
-		pendingDel = pendingDel[:0]
-		pendingAdd = pendingAdd[:0]
-	}
-
-	for _, line := range raw {
-		switch {
-		case strings.HasPrefix(line, "@@"):
-			flush()
-			if oldStart, newStart, ok := parseHunkStarts(line); ok {
-				oldLine = oldStart
-				newLine = newStart
-				sawHunk = true
-			}
-			lines = append(lines, diffHunkStyle.Render(truncate("  "+line, width)))
-		case strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---"):
-			if !sawHunk {
-				flush()
-				lines = append(lines, colorizeDiffLine(truncate(line, width)))
-				continue
-			}
-			pendingDel = append(pendingDel, diffLine{no: oldLine, text: strings.TrimPrefix(line, "-")})
-			oldLine++
-		case strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++"):
-			if !sawHunk {
-				flush()
-				lines = append(lines, colorizeDiffLine(truncate(line, width)))
-				continue
-			}
-			pendingAdd = append(pendingAdd, diffLine{no: newLine, text: strings.TrimPrefix(line, "+")})
-			newLine++
-		case strings.HasPrefix(line, " "):
-			if !sawHunk {
-				flush()
-				lines = append(lines, colorizeDiffLine(truncate(line, width)))
-				continue
-			}
-			flush()
-			text := strings.TrimPrefix(line, " ")
-			lines = append(lines, formatDiffRow(leftW, rightW, separator, oldLine, text, ' ', newLine, text, ' '))
-			oldLine++
-			newLine++
-		default:
-			flush()
-			lines = append(lines, colorizeDiffLine(truncate(line, width)))
-		}
-	}
-	flush()
-
-	return lines
-}
-
-func hasUnifiedHunk(lines []string) bool {
-	for _, line := range lines {
-		if strings.HasPrefix(line, "@@") {
-			return true
-		}
-	}
-	return false
-}
-
-func truncateLines(lines []string, width int) []string {
-	out := make([]string, 0, len(lines))
-	for _, line := range lines {
-		out = append(out, truncate(line, width))
-	}
-	return out
-}
-
-func colorizeAndTruncateLines(lines []string, width int) []string {
-	out := make([]string, 0, len(lines))
-	for _, line := range lines {
-		out = append(out, colorizeDiffLine(truncate(line, width)))
-	}
-	return out
-}
-
-func parseHunkStarts(header string) (int, int, bool) {
-	match := hunkHeaderRE.FindStringSubmatch(header)
-	if len(match) != 3 {
-		return 0, 0, false
-	}
-
-	oldStart, err := strconv.Atoi(match[1])
-	if err != nil {
-		return 0, 0, false
-	}
-	newStart, err := strconv.Atoi(match[2])
-	if err != nil {
-		return 0, 0, false
-	}
-	return oldStart, newStart, true
-}
-
-func formatDiffRow(leftW, rightW int, separator string, leftNo int, leftText string, leftSign rune, rightNo int, rightText string, rightSign rune) string {
-	left := styleDiffCell(formatDiffCell(leftW, leftNo, leftText, leftSign), leftSign)
-	right := styleDiffCell(formatDiffCell(rightW, rightNo, rightText, rightSign), rightSign)
-	return left + diffSepStyle.Render(separator) + right
-}
-
-func formatDiffCell(width int, lineNo int, text string, sign rune) string {
-	lineLabel := ""
-	if lineNo > 0 {
-		lineLabel = strconv.Itoa(lineNo)
-	}
-	cell := fmt.Sprintf("%5s %c %s", lineLabel, sign, text)
-	return padRight(truncate(cell, width), width)
-}
-
-func padRight(s string, width int) string {
-	if width <= 0 {
-		return ""
-	}
-	r := []rune(s)
-	if len(r) >= width {
-		return s
-	}
-	return s + strings.Repeat(" ", width-len(r))
-}
-
-func styleDiffCell(cell string, sign rune) string {
-	switch sign {
-	case '+':
-		return diffAddStyle.Render(cell)
-	case '-':
-		return diffDelStyle.Render(cell)
-	default:
-		return diffContextStyle.Render(cell)
-	}
-}
-
-func colorizeDiffLine(line string) string {
-	switch {
-	case strings.HasPrefix(line, "@@"):
-		return diffHunkStyle.Render(line)
-	case strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++"):
-		return diffAddStyle.Render(line)
-	case strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---"):
-		return diffDelStyle.Render(line)
-	case strings.HasPrefix(line, "Index:"),
-		strings.HasPrefix(line, "==="),
-		strings.HasPrefix(line, "---"),
-		strings.HasPrefix(line, "+++"),
-		strings.HasPrefix(line, "$ svn"):
-		return diffMetaStyle.Render(line)
-	default:
-		return diffContextStyle.Render(line)
-	}
-}
-
-func (m model) renderFooter(width int) string {
-	help := "j/k move  space mark  d diff  l log  c commit  a add  v revert  u update  r refresh  q quit"
-	if m.commitPrompt {
-		text := truncate(fmt.Sprintf("Commit (%d path): %s", len(m.commitPaths), m.commitInput.View()), max(8, width))
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("11")).
-			Render(text)
-	}
-	if m.revertConfirm {
-		text := truncate(fmt.Sprintf("Revert %d path(s)? Press y or n.", len(m.revertPaths)), max(8, width))
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("11")).
-			Render(text)
-	}
-	text := truncate(fmt.Sprintf("%s | %s", help, m.statusLine), max(8, width))
-	return lipgloss.NewStyle().Foreground(lipgloss.Color("8")).
-		Render(text)
-}
-
-func (m *model) moveCursor(delta int) {
-	if len(m.entries) == 0 {
-		m.cursor = 0
-		return
-	}
-	m.cursor += delta
-	if m.cursor < 0 {
-		m.cursor = 0
-	}
-	if m.cursor >= len(m.entries) {
-		m.cursor = len(m.entries) - 1
-	}
-}
-
-func (m *model) toggleMark() {
-	path := m.currentPath()
-	if path == "" {
-		return
-	}
-	if _, ok := m.marked[path]; ok {
-		delete(m.marked, path)
-		return
-	}
-	m.marked[path] = struct{}{}
-}
-
-func (m model) currentPath() string {
-	if len(m.entries) == 0 || m.cursor < 0 || m.cursor >= len(m.entries) {
-		return ""
-	}
-	return m.entries[m.cursor].Path
-}
-
-func (m *model) cleanupMarks() {
-	if len(m.marked) == 0 {
-		return
-	}
-	active := map[string]struct{}{}
-	for _, e := range m.entries {
-		active[e.Path] = struct{}{}
-	}
-	for p := range m.marked {
-		if _, ok := active[p]; !ok {
-			delete(m.marked, p)
-		}
-	}
-}
-
-func (m model) selectedTargets() []string {
-	if len(m.marked) > 0 {
-		targets := make([]string, 0, len(m.marked))
-		for p := range m.marked {
-			targets = append(targets, p)
-		}
-		sort.Strings(targets)
-		return targets
-	}
-	if p := m.currentPath(); p != "" {
-		return []string{p}
-	}
-	return nil
-}
-
-func (m model) commitTargets() []string {
-	targets := m.selectedTargets()
-	if len(targets) > 0 {
-		return targets
-	}
-	return []string{"."}
-}
-
-func (m model) addTargets() []string {
-	if len(m.marked) > 0 {
-		targets := make([]string, 0, len(m.marked))
-		for _, e := range m.entries {
-			if e.Code == '?' {
-				if _, ok := m.marked[e.Path]; ok {
-					targets = append(targets, e.Path)
-				}
-			}
-		}
-		return targets
-	}
-
-	if len(m.entries) > 0 {
-		entry := m.entries[m.cursor]
-		if entry.Code == '?' {
-			return []string{entry.Path}
-		}
-	}
-	return nil
-}
-
-func (m model) maybeFollowDiff() tea.Cmd {
-	if strings.HasPrefix(m.previewTitle, "Diff:") {
-		if p := m.currentPath(); p != "" {
-			return diffCmd(p)
-		}
-	}
-	return nil
-}
-
-func (m model) scrollStart(rows int) int {
-	if len(m.entries) <= rows {
+// runCLI handles non-TUI subcommands and returns the process exit code.
+func runCLI(args []string) int {
+	switch cmd := args[0]; {
+	case isHelpArg(cmd):
+		fmt.Println(cliHelp())
 		return 0
-	}
-	start := m.cursor - rows/2
-	if start < 0 {
-		start = 0
-	}
-	maxStart := len(m.entries) - rows
-	if start > maxStart {
-		start = maxStart
-	}
-	return start
-}
-
-func fetchStatusCmd() tea.Cmd {
-	return func() tea.Msg {
-		out, err := runSVN("status")
-		if err != nil {
-			return statusMsg{raw: out, err: err}
+	case cmd == "-v" || cmd == "--version" || cmd == "version":
+		fmt.Println(currentVersion())
+		return 0
+	case cmd == "update":
+		if len(args) > 2 {
+			fmt.Fprintf(os.Stderr, "too many arguments for update\n\n%s\n", updateHelp())
+			return 2
 		}
-		return statusMsg{entries: parseStatus(out), raw: out}
-	}
-}
-
-func diffCmd(path string) tea.Cmd {
-	return func() tea.Msg {
-		args := []string{"diff", path}
-		out, err := runSVN(args...)
-		return previewMsg{
-			title: "Diff: " + path,
-			body:  formatSVNResult(args, out, err),
-		}
-	}
-}
-
-func logCmd(path string) tea.Cmd {
-	return func() tea.Msg {
-		args := []string{"log", "-l", "20", path}
-		out, err := runSVN(args...)
-		return previewMsg{
-			title: "Log: " + path,
-			body:  formatSVNResult(args, out, err),
-		}
-	}
-}
-
-func updateCmd() tea.Cmd {
-	return func() tea.Msg {
-		args := []string{"update"}
-		out, err := runSVN(args...)
-		return actionMsg{
-			title:   "Update",
-			body:    formatSVNResult(args, out, err),
-			refresh: true,
-		}
-	}
-}
-
-func addCmd(paths []string) tea.Cmd {
-	return func() tea.Msg {
-		args := append([]string{"add", "--parents"}, paths...)
-		out, err := runSVN(args...)
-		return actionMsg{
-			title:   "Add",
-			body:    formatSVNResult(args, out, err),
-			refresh: true,
-		}
-	}
-}
-
-func revertCmd(paths []string) tea.Cmd {
-	return func() tea.Msg {
-		args := append([]string{"revert"}, paths...)
-		out, err := runSVN(args...)
-		return actionMsg{
-			title:   "Revert",
-			body:    formatSVNResult(args, out, err),
-			refresh: true,
-		}
-	}
-}
-
-func commitCmd(paths []string, message string) tea.Cmd {
-	return func() tea.Msg {
-		args := []string{"commit", "-m", message}
-		args = append(args, paths...)
-		out, err := runSVN(args...)
-		return actionMsg{
-			title:   "Commit",
-			body:    formatSVNResult(args, out, err),
-			refresh: true,
-		}
-	}
-}
-
-func parseStatus(out string) []statusEntry {
-	var entries []statusEntry
-	for _, raw := range strings.Split(strings.ReplaceAll(out, "\r\n", "\n"), "\n") {
-		line := strings.TrimRight(raw, " ")
-		if line == "" {
-			continue
-		}
-		if len(line) < 2 {
-			continue
-		}
-		code := rune(line[0])
-		path := ""
-		if len(line) >= 9 {
-			path = strings.TrimSpace(line[8:])
-		}
-		if path == "" {
-			parts := strings.Fields(line)
-			if len(parts) < 2 {
-				continue
+		tag := "latest"
+		if len(args) == 2 {
+			switch a := strings.TrimSpace(args[1]); {
+			case isHelpArg(a):
+				fmt.Println(updateHelp())
+				return 0
+			case strings.HasPrefix(a, "-"):
+				fmt.Fprintf(os.Stderr, "unknown option for update: %s\n\n%s\n", a, updateHelp())
+				return 2
+			case a != "":
+				tag = a
 			}
-			path = strings.Join(parts[1:], " ")
 		}
-		entries = append(entries, statusEntry{
-			Code: code,
-			Path: path,
-			Raw:  line,
-		})
-	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
-	return entries
-}
-
-func runSVN(args ...string) (string, error) {
-	cmd := exec.Command("svn", args...)
-	var buf bytes.Buffer
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
-	err := cmd.Run()
-	return strings.TrimRight(buf.String(), "\n"), err
-}
-
-func formatSVNResult(args []string, out string, err error) string {
-	var b strings.Builder
-	b.WriteString("$ svn ")
-	b.WriteString(strings.Join(args, " "))
-	b.WriteString("\n\n")
-	if strings.TrimSpace(out) != "" {
-		b.WriteString(out)
-		b.WriteString("\n")
-	}
-	if err != nil {
-		b.WriteString("\nerror: ")
-		b.WriteString(err.Error())
-		b.WriteString("\n")
-	}
-	if strings.TrimSpace(out) == "" && err == nil {
-		b.WriteString("(no output)\n")
-	}
-	return strings.TrimSpace(b.String())
-}
-
-func statusCodeStyle(code rune) lipgloss.Style {
-	switch code {
-	case 'M':
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("11"))
-	case 'A':
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
-	case 'D':
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
-	case '?':
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("12"))
-	case '!':
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("13"))
-	case 'C':
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
+		if err := runSelfUpdate(tag); err != nil {
+			fmt.Fprintf(os.Stderr, "lazysvn update failed: %v\n", err)
+			return 1
+		}
+		return 0
+	case cmd == "uninstall":
+		if len(args) > 2 {
+			fmt.Fprintf(os.Stderr, "too many arguments for uninstall\n\n%s\n", uninstallHelp())
+			return 2
+		}
+		if len(args) == 2 {
+			if isHelpArg(args[1]) {
+				fmt.Println(uninstallHelp())
+				return 0
+			}
+			fmt.Fprintf(os.Stderr, "unknown argument for uninstall: %s\n\n%s\n", args[1], uninstallHelp())
+			return 2
+		}
+		if err := runSelfUninstall(); err != nil {
+			fmt.Fprintf(os.Stderr, "lazysvn uninstall failed: %v\n", err)
+			return 1
+		}
+		return 0
 	default:
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("7"))
+		fmt.Fprintf(os.Stderr, "unknown argument: %s\n\n%s\n", cmd, cliHelp())
+		return 2
 	}
 }
 
@@ -941,15 +98,16 @@ LazySVN keys:
   j/k or arrows  Move
   g / G          Top / Bottom
   space          Mark/unmark file
-  d or Enter     Diff selected file
+  esc            Clear all marks
+  d or Enter     Diff selected file (follows the cursor)
   l              Show recent log (20 entries) for selected file
   c              Commit marked files (or current file)
-  a              svn add for unversioned (? files)
-  v              Revert marked/current file (with confirmation)
+  a              svn add marked/current unversioned (?) files
+  v              Revert marked/current files (lists them first)
   u              svn update
   r              Refresh status
   h or ?         Show help
-  q              Quit
+  q / ctrl+c     Quit
 	`)
 }
 
@@ -973,46 +131,38 @@ Command:
 `)
 }
 
+// currentVersion reports the version baked into this binary: the -X ldflag,
+// else the module version Go stamps from the VCS tag at build time, else "dev".
+// It never inspects the environment the binary runs in.
 func currentVersion() string {
-	if v := normalizeVersion(version); v != "" && v != "dev" {
+	if v := normalizeVersion(version); v != "" {
 		return v
 	}
-
-	info, ok := debug.ReadBuildInfo()
-	if ok && info != nil {
-		if mv := normalizeVersion(info.Main.Version); mv != "" && mv != "(devel)" {
-			return mv
+	if info, ok := debug.ReadBuildInfo(); ok && info != nil {
+		if v := normalizeVersion(info.Main.Version); v != "" {
+			return v
 		}
 	}
-
-	if gv := gitTagVersion(); gv != "" {
-		return gv
-	}
-
-	return "0.0.0"
+	return "dev"
 }
 
 func normalizeVersion(v string) string {
 	out := strings.TrimSpace(v)
-	if out == "" || out == "(devel)" {
+	if out == "" || out == "(devel)" || out == "dev" {
 		return ""
 	}
-	if strings.HasPrefix(out, "refs/tags/") {
-		out = strings.TrimPrefix(out, "refs/tags/")
-	}
+	out = strings.TrimPrefix(out, "refs/tags/")
 	if pseudoVersionRE.MatchString(out) {
 		return ""
 	}
-	if strings.HasPrefix(out, "v") && len(out) > 1 {
-		if r := rune(out[1]); r >= '0' && r <= '9' {
-			out = out[1:]
-		}
+	if len(out) > 1 && out[0] == 'v' && out[1] >= '0' && out[1] <= '9' {
+		out = out[1:]
 	}
 	out = strings.SplitN(out, "-", 2)[0]
 	out = strings.SplitN(out, "+", 2)[0]
 
 	parts := strings.Split(out, ".")
-	if len(parts) == 0 || len(parts) > 3 {
+	if len(parts) > 3 {
 		return ""
 	}
 	for _, p := range parts {
@@ -1029,17 +179,6 @@ func normalizeVersion(v string) string {
 		parts = append(parts, "0")
 	}
 	return strings.Join(parts, ".")
-}
-
-func gitTagVersion() string {
-	cmd := exec.Command("git", "describe", "--tags", "--abbrev=0")
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = io.Discard
-	if err := cmd.Run(); err != nil {
-		return ""
-	}
-	return normalizeVersion(out.String())
 }
 
 func updateHelp() string {
@@ -1147,32 +286,4 @@ func runSelfUninstall() error {
 
 	fmt.Printf("Removed %s\n", exePath)
 	return nil
-}
-
-func truncate(s string, maxLen int) string {
-	if maxLen <= 0 {
-		return ""
-	}
-	r := []rune(s)
-	if len(r) <= maxLen {
-		return s
-	}
-	if maxLen <= 1 {
-		return "…"
-	}
-	return string(r[:maxLen-1]) + "…"
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }

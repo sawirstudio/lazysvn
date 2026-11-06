@@ -92,12 +92,15 @@ brew uninstall lazysvn
 - `j` / `k` or arrows: move
 - `g` / `G`: top / bottom
 - `space`: mark/unmark file
-- `d` or `Enter`: diff selected file
+- `esc`: clear all marks
+- `d` or `Enter`: diff selected file (the diff follows the cursor)
 - `l`: show log for selected file
 - `c`: commit marked files (or current file)
-- `a`: add marked/selected unversioned files (`?`)
-- `v`: revert marked/current file (with confirmation)
+- `a`: add marked/selected unversioned files (`?`); already-versioned selections are skipped and reported
+- `v`: revert marked/current files (the confirmation lists every path)
 - `u`: update working copy
 - `r`: refresh status
 - `h` or `?`: help
-- `q`: quit
+- `q` or `ctrl+c`: quit (`ctrl+c` works inside prompts too)
+
+Only one working-copy-changing command (`update`, `add`, `revert`, `commit`) runs at a time; other svn commands wait until it finishes.
