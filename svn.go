@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"sort"
 	"strconv"
@@ -70,11 +71,20 @@ var svnRunner = func(args ...string) svnResult {
 }
 
 // withPaths appends paths after "--" so a file named like "-x" is never read
-// as an option.
+// as an option, and ends each with "@". svn reads the text after the last "@"
+// of a target as a peg revision, so "icon@2x.png" is rejected; "icon@2x.png@"
+// names the file with an empty (working copy) peg that svn strips.
+//
+// svn diff is the exception: it takes working-copy paths literally and
+// rejects the trailing "@", so diffCmd builds its arguments by hand.
 func withPaths(args []string, paths []string) []string {
-	out := append([]string(nil), args...)
+	out := make([]string, 0, len(args)+1+len(paths))
+	out = append(out, args...)
 	out = append(out, "--")
-	return append(out, paths...)
+	for _, p := range paths {
+		out = append(out, p+"@")
+	}
+	return out
 }
 
 // ---- messages -------------------------------------------------------------
@@ -95,12 +105,31 @@ type previewMsg struct {
 	result svnResult
 }
 
-// actionMsg reports the end of a working-copy-changing operation.
+// opRequest is one working-copy-changing operation, as confirmed by the user.
+type opRequest struct {
+	op      opKind
+	paths   []string // every target, as listed to the user; unmarked on success
+	missing []string // commit only: '!' paths to schedule for deletion first
+	message string   // commit only
+	note    string   // appended to the success notice
+}
+
+// actionMsg reports the end of a working-copy-changing operation. steps holds
+// the svn runs that came before result, which is the last (or the failed) one.
 type actionMsg struct {
 	op     opKind
 	paths  []string
 	note   string
+	steps  []svnResult
 	result svnResult
+}
+
+func (a actionMsg) transcript() string {
+	parts := make([]string, 0, len(a.steps)+1)
+	for _, r := range a.steps {
+		parts = append(parts, r.transcript())
+	}
+	return strings.Join(append(parts, a.result.transcript()), "\n\n")
 }
 
 func fetchStatusCmd(seq int) tea.Cmd {
@@ -119,7 +148,9 @@ func fetchStatusCmd(seq int) tea.Cmd {
 
 func diffCmd(seq int, path string) tea.Cmd {
 	return func() tea.Msg {
-		return previewMsg{seq: seq, kind: previewDiff, path: path, result: svnRunner(withPaths([]string{"diff"}, []string{path})...)}
+		// --depth empty: a directory's own entry shows only its property
+		// changes; its changed children are entries of their own.
+		return previewMsg{seq: seq, kind: previewDiff, path: path, result: svnRunner("diff", "--depth", "empty", "--", path)}
 	}
 }
 
@@ -129,22 +160,54 @@ func logCmd(seq int, path string) tea.Cmd {
 	}
 }
 
-func actionCmd(op opKind, paths []string, message, note string) tea.Cmd {
-	paths = append([]string(nil), paths...)
-	var args []string
-	switch op {
-	case opUpdate:
-		args = []string{"update"}
-	case opAdd:
-		args = withPaths([]string{"add", "--parents"}, paths)
-	case opRevert:
-		args = withPaths([]string{"revert"}, paths)
-	case opCommit:
-		args = withPaths([]string{"commit", "-m", message}, paths)
-	}
+func actionCmd(req opRequest) tea.Cmd {
+	req.paths = append([]string(nil), req.paths...)
+	req.missing = append([]string(nil), req.missing...)
 	return func() tea.Msg {
-		return actionMsg{op: op, paths: paths, note: note, result: svnRunner(args...)}
+		msg := actionMsg{op: req.op, paths: req.paths, note: req.note}
+		switch req.op {
+		case opUpdate:
+			msg.result = svnRunner("update")
+		case opAdd:
+			msg.result = svnRunner(withPaths([]string{"add", "--parents"}, req.paths)...)
+		case opRevert:
+			// Without --depth infinity svn refuses to revert an added
+			// directory. The targets already list every changed path below a
+			// selected directory, so the user saw what this touches.
+			msg.result = svnRunner(withPaths([]string{"revert", "--depth", "infinity"}, req.paths)...)
+		case opCommit:
+			msg.steps, msg.result = commit(req)
+		}
+		return msg
 	}
+}
+
+// commit schedules missing files for deletion (svn commit skips them
+// silently otherwise) and commits with the message read from a file: -m
+// fails when the message names an existing file and, outside a UTF-8
+// locale, when it holds non-ASCII text.
+func commit(req opRequest) (steps []svnResult, result svnResult) {
+	if len(req.missing) > 0 {
+		del := svnRunner(withPaths([]string{"delete"}, req.missing)...)
+		if del.err != nil {
+			return nil, del
+		}
+		steps = append(steps, del)
+	}
+	f, err := os.CreateTemp("", "lazysvn-commit-*.txt")
+	if err != nil {
+		return steps, svnResult{args: []string{"commit"}, err: fmt.Errorf("stage commit message: %w", err)}
+	}
+	defer os.Remove(f.Name())
+	_, err = f.WriteString(req.message)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return steps, svnResult{args: []string{"commit"}, err: fmt.Errorf("stage commit message: %w", err)}
+	}
+	args := []string{"commit", "--encoding", "UTF-8", "--force-log", "-F", f.Name()}
+	return steps, svnRunner(withPaths(args, req.paths)...)
 }
 
 // ---- status parsing -------------------------------------------------------
@@ -154,6 +217,8 @@ type statusEntry struct {
 	PropCode   rune // property status letter, as in the second column (' ' if none)
 	Path       string
 	Changelist string
+	MovedFrom  string // other side of a move, in the same form as Path
+	MovedTo    string
 }
 
 // Unversioned reports whether svn add applies to this entry.
@@ -172,8 +237,8 @@ var errBadStatusXML = errors.New("malformed svn status XML")
 func parseStatusXML(data []byte) ([]statusEntry, error) {
 	entries := make([]statusEntry, 0, bytes.Count(data, []byte("<entry")))
 	var (
-		path, changelist string
-		sawStatus        bool
+		path, changelist, movedFrom, movedTo string
+		sawStatus                            bool
 	)
 
 	for i := 0; ; {
@@ -276,6 +341,10 @@ func parseStatusXML(data []byte) ([]statusEntry, error) {
 				props = val
 			case elem == elemWCStatus && string(attr) == "tree-conflicted":
 				treeConflicted = val
+			case elem == elemWCStatus && string(attr) == "moved-from":
+				movedFrom = xmlUnescape(val)
+			case elem == elemWCStatus && string(attr) == "moved-to":
+				movedTo = xmlUnescape(val)
 			}
 		}
 
@@ -283,9 +352,10 @@ func parseStatusXML(data []byte) ([]statusEntry, error) {
 		case elemStatus:
 			sawStatus = true
 		case elemWCStatus:
-			if e, ok := makeStatusEntry(path, changelist, item, props, treeConflicted); ok {
+			if e, ok := makeStatusEntry(path, changelist, item, props, treeConflicted, movedFrom, movedTo); ok {
 				entries = append(entries, e)
 			}
+			movedFrom, movedTo = "", ""
 		}
 	}
 
@@ -320,7 +390,7 @@ func elemOf(name []byte) xmlElem {
 	return elemOther
 }
 
-func makeStatusEntry(path, changelist string, item, props, treeConflicted []byte) (statusEntry, bool) {
+func makeStatusEntry(path, changelist string, item, props, treeConflicted []byte, movedFrom, movedTo string) (statusEntry, bool) {
 	if path == "" || string(item) == "external" { // externals are mount points, not changes
 		return statusEntry{}, false
 	}
@@ -341,7 +411,7 @@ func makeStatusEntry(path, changelist string, item, props, treeConflicted []byte
 	if code == ' ' {
 		return statusEntry{}, false
 	}
-	return statusEntry{Code: code, PropCode: prop, Path: path, Changelist: changelist}, true
+	return statusEntry{Code: code, PropCode: prop, Path: path, Changelist: changelist, MovedFrom: movedFrom, MovedTo: movedTo}, true
 }
 
 func itemCode(item []byte) rune {

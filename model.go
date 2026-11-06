@@ -106,6 +106,8 @@ type model struct {
 
 	mode         mode
 	pendingPaths []string // targets captured when entering commit/confirmRevert
+	pendingMiss  []string // commit: pendingPaths that are missing ('!')
+	pendingNote  string
 	commitInput  textinput.Model
 
 	preview preview
@@ -239,7 +241,7 @@ func (m model) onAction(msg actionMsg) (model, tea.Cmd) {
 	if !ok {
 		title += " failed"
 	}
-	m.showPreview(preview{kind: previewAction, title: title}.withText(msg.result.transcript()))
+	m.showPreview(preview{kind: previewAction, title: title}.withText(msg.transcript()))
 	if ok {
 		m.unmark(msg.paths)
 		m.setNotice(noticeInfo, strings.TrimSpace(fmt.Sprintf("svn %s finished. %s", msg.op, msg.note)))
@@ -312,7 +314,7 @@ func (m model) updateNormal(msg tea.KeyMsg) (model, tea.Cmd) {
 		m.followDiff = false
 		return m, m.requestPreview(previewLog, path, logCmd)
 	case "u":
-		return m, m.startOp(opUpdate, nil, "", "")
+		return m, m.startOp(opRequest{op: opUpdate})
 	case "a":
 		targets, skipped := m.addTargets()
 		if len(targets) == 0 {
@@ -323,24 +325,33 @@ func (m model) updateNormal(msg tea.KeyMsg) (model, tea.Cmd) {
 		if skipped > 0 {
 			note = fmt.Sprintf("Skipped %d selected file(s) that are already versioned.", skipped)
 		}
-		return m, m.startOp(opAdd, targets, "", note)
+		return m, m.startOp(opRequest{op: opAdd, paths: targets, note: note})
 	case "v":
-		targets := m.selectedTargets()
-		if len(targets) == 0 {
+		sel := m.selectedTargets()
+		if len(sel) == 0 {
 			m.setNotice(noticeError, "No file selected.")
 			return m, nil
 		}
 		m.mode = modeConfirmRevert
-		m.pendingPaths = targets
+		m.pendingPaths = m.expandTargets(sel, false)
 		return m, nil
 	case "c":
-		targets := m.selectedTargets()
+		targets, missing, skipped := m.commitTargets()
 		if len(targets) == 0 {
-			m.setNotice(noticeError, "Nothing to commit.")
+			if skipped > 0 {
+				m.setNotice(noticeError, "Unversioned files can't be committed; press a to add them first.")
+			} else {
+				m.setNotice(noticeError, "Nothing to commit.")
+			}
 			return m, nil
 		}
 		m.mode = modeCommit
 		m.pendingPaths = targets
+		m.pendingMiss = missing
+		m.pendingNote = ""
+		if skipped > 0 {
+			m.pendingNote = fmt.Sprintf("Skipped %d unversioned file(s); add them first to commit them.", skipped)
+		}
 		m.commitInput.SetValue("")
 		return m, m.commitInput.Focus()
 	}
@@ -359,9 +370,9 @@ func (m model) updateCommit(msg tea.KeyMsg) (model, tea.Cmd) {
 			m.setNotice(noticeError, "Commit message cannot be empty.")
 			return m, nil
 		}
-		paths := m.pendingPaths
+		req := opRequest{op: opCommit, paths: m.pendingPaths, missing: m.pendingMiss, message: message, note: m.pendingNote}
 		m.leaveMode()
-		return m, m.startOp(opCommit, paths, message, "")
+		return m, m.startOp(req)
 	}
 	m.notice = notice{}
 	var cmd tea.Cmd
@@ -372,9 +383,9 @@ func (m model) updateCommit(msg tea.KeyMsg) (model, tea.Cmd) {
 func (m model) updateConfirmRevert(msg tea.KeyMsg) (model, tea.Cmd) {
 	switch msg.String() {
 	case "y", "Y":
-		paths := m.pendingPaths
+		req := opRequest{op: opRevert, paths: m.pendingPaths}
 		m.leaveMode()
-		return m, m.startOp(opRevert, paths, "", "")
+		return m, m.startOp(req)
 	case "n", "N", "esc", "q":
 		m.leaveMode()
 		m.setNotice(noticeInfo, "Revert canceled.")
@@ -386,7 +397,7 @@ func (m model) updateConfirmRevert(msg tea.KeyMsg) (model, tea.Cmd) {
 
 func (m *model) leaveMode() {
 	m.mode = modeNormal
-	m.pendingPaths = nil
+	m.pendingPaths, m.pendingMiss, m.pendingNote = nil, nil, ""
 	m.commitInput.Blur()
 }
 
@@ -439,7 +450,8 @@ func (m *model) refresh() tea.Cmd {
 
 // startOp begins a working-copy-changing operation. note is appended to the
 // success notice.
-func (m *model) startOp(op opKind, paths []string, message, note string) tea.Cmd {
+func (m *model) startOp(req opRequest) tea.Cmd {
+	op, paths, note := req.op, req.paths, req.note
 	m.running = op
 	// Any status reply still in flight predates the operation.
 	m.statusSeq++
@@ -454,7 +466,7 @@ func (m *model) startOp(op opKind, paths []string, message, note string) tea.Cmd
 		body += "\n\n" + note
 	}
 	m.showPreview(preview{kind: previewAction, title: op.title()}.withText(body))
-	return actionCmd(op, paths, message, note)
+	return actionCmd(req)
 }
 
 // ---- selection ------------------------------------------------------------
@@ -534,10 +546,7 @@ func (m model) selectedTargets() []string {
 // addTargets is selectedTargets filtered to unversioned entries, plus how many
 // selected paths were left out.
 func (m model) addTargets() (targets []string, skipped int) {
-	byPath := make(map[string]statusEntry, len(m.entries))
-	for _, e := range m.entries {
-		byPath[e.Path] = e
-	}
+	byPath := m.entriesByPath()
 	for _, p := range m.selectedTargets() {
 		if byPath[p].Unversioned() {
 			targets = append(targets, p)
@@ -546,6 +555,119 @@ func (m model) addTargets() (targets []string, skipped int) {
 		}
 	}
 	return targets, skipped
+}
+
+// commitTargets is selectedTargets made committable: unversioned paths are
+// left out (counted in skipped) and expandTargets adds what svn needs or will
+// touch anyway. missing lists the '!' targets, which must be deleted first.
+func (m model) commitTargets() (targets, missing []string, skipped int) {
+	byPath := m.entriesByPath()
+	var sel []string
+	for _, p := range m.selectedTargets() {
+		if byPath[p].Unversioned() {
+			skipped++
+			continue
+		}
+		sel = append(sel, p)
+	}
+	if len(sel) == 0 {
+		return nil, nil, skipped
+	}
+	targets = m.expandTargets(sel, true)
+	for _, p := range targets {
+		if byPath[p].Code == '!' {
+			missing = append(missing, p)
+		}
+	}
+	return targets, missing, skipped
+}
+
+// expandTargets returns sel plus every status entry the svn operation will
+// act on or requires, so the confirmation lists exactly what changes:
+//
+//   - changed entries below a selected directory: commit and revert both
+//     recurse, and showing only the directory would hide them;
+//   - the other side of a move: svn refuses to commit one side alone, and
+//     reverting one side leaves the other as a plain add or delete;
+//   - for commit, added or replaced ancestors: svn refuses to commit a path
+//     whose parent is not yet in the repository unless the parent is
+//     committed too (which in turn pulls in the parent's other changes).
+//
+// Unversioned entries are never added; svn skips them. The result is sorted.
+func (m model) expandTargets(sel []string, forCommit bool) []string {
+	byPath := m.entriesByPath()
+	in := make(map[string]struct{}, len(sel))
+	queue := make([]string, 0, len(sel))
+	add := func(p string) {
+		if _, ok := in[p]; !ok {
+			in[p] = struct{}{}
+			queue = append(queue, p)
+		}
+	}
+	for _, p := range sel {
+		add(p)
+	}
+	for len(queue) > 0 {
+		// Drain moves and ancestors for every newly added path, then sweep
+		// for descendants of everything so far; repeat until nothing is new.
+		for len(queue) > 0 {
+			p := queue[0]
+			queue = queue[1:]
+			e := byPath[p]
+			for _, q := range [2]string{e.MovedFrom, e.MovedTo} {
+				if pe, ok := byPath[q]; ok && q != "" && !pe.Unversioned() {
+					add(q)
+				}
+			}
+			if forCommit {
+				for a := parentPath(p); a != ""; a = parentPath(a) {
+					if ae := byPath[a]; ae.Code == 'A' || ae.Code == 'R' {
+						add(a)
+					}
+				}
+			}
+		}
+		_, all := in["."]
+		for _, e := range m.entries {
+			if _, ok := in[e.Path]; ok || e.Unversioned() {
+				continue
+			}
+			if all && e.Path != "." {
+				add(e.Path)
+				continue
+			}
+			for a := parentPath(e.Path); a != ""; a = parentPath(a) {
+				if _, ok := in[a]; ok {
+					add(e.Path)
+					break
+				}
+			}
+		}
+	}
+	out := make([]string, 0, len(in))
+	for p := range in {
+		out = append(out, p)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (m model) entriesByPath() map[string]statusEntry {
+	byPath := make(map[string]statusEntry, len(m.entries))
+	for _, e := range m.entries {
+		byPath[e.Path] = e
+	}
+	return byPath
+}
+
+// parentPath strips the last element of a status path, which uses "/" or, on
+// Windows, "\". A top-level path has no parent ("").
+func parentPath(p string) string {
+	i := strings.LastIndexAny(p, `/\`)
+	if i <= 0 {
+		return ""
+	}
+	return p[:i]
 }
 
 // ---- helpers --------------------------------------------------------------

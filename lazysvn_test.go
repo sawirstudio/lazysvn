@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -495,9 +496,277 @@ func TestAgainstRealSVN(t *testing.T) {
 		t.Errorf("removed SQL comment parsed as %+v from:\n%s", del, pm.result.stdout)
 	}
 
-	am := actionCmd(opRevert, []string{"-dash.txt"}, "", "")().(actionMsg)
+	am := actionCmd(opRequest{op: opRevert, paths: []string{"-dash.txt"}})().(actionMsg)
 	if am.result.err != nil {
 		t.Errorf("revert of dash-prefixed path failed: %s", am.result.transcript())
+	}
+}
+
+// svnFixture is a fresh repository and checkout. run fails the test on
+// error and returns the combined output.
+type svnFixture struct {
+	t  *testing.T
+	wc string
+}
+
+func newSVNFixture(t *testing.T) svnFixture {
+	t.Helper()
+	for _, bin := range []string{"svn", "svnadmin"} {
+		if _, err := exec.LookPath(bin); err != nil {
+			t.Skipf("%s not installed", bin)
+		}
+	}
+	dir := t.TempDir()
+	f := svnFixture{t: t, wc: filepath.Join(dir, "wc")}
+	f.runIn(dir, "svnadmin", "create", "repo")
+	url := "file://" + filepath.ToSlash(filepath.Join(dir, "repo"))
+	f.runIn(dir, "svn", "mkdir", "-q", "-m", "init", url+"/trunk")
+	f.runIn(dir, "svn", "co", "-q", url+"/trunk", "wc")
+	return f
+}
+
+func (f svnFixture) on(t *testing.T) svnFixture { f.t = t; return f }
+
+func (f svnFixture) runIn(wd, name string, args ...string) string {
+	f.t.Helper()
+	cmd := exec.Command(name, args...)
+	cmd.Dir = wd
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		f.t.Fatalf("%s %v: %v\n%s", name, args, err, out)
+	}
+	return string(out)
+}
+
+func (f svnFixture) svn(args ...string) string {
+	f.t.Helper()
+	return f.runIn(f.wc, "svn", args...)
+}
+
+func (f svnFixture) write(rel, body string) {
+	f.t.Helper()
+	p := filepath.Join(f.wc, rel)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		f.t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+// model loads the working copy's real status.
+func (f svnFixture) model() model {
+	f.t.Helper()
+	msg := fetchStatusCmd(1)().(statusMsg)
+	if msg.err != nil {
+		f.t.Fatalf("status: %v\n%s", msg.err, msg.result.transcript())
+	}
+	return loaded(msg.entries...)
+}
+
+// act marks sel, presses keys and runs the svn operation that results.
+func (f svnFixture) act(m model, sel []string, keys ...string) (model, actionMsg) {
+	f.t.Helper()
+	m.marked = map[string]struct{}{}
+	for _, p := range sel {
+		m.marked[p] = struct{}{}
+	}
+	m, cmd := press(f.t, m, keys...)
+	if cmd == nil {
+		f.t.Fatalf("keys %v started nothing; notice: %q", keys, m.notice.text)
+	}
+	am, ok := cmd().(actionMsg)
+	if !ok {
+		f.t.Fatalf("keys %v did not run an svn operation", keys)
+	}
+	if am.result.err != nil {
+		f.t.Fatalf("keys %v failed:\n%s", keys, am.transcript())
+	}
+	return m, am
+}
+
+func (f svnFixture) commit(sel []string, message string) actionMsg {
+	f.t.Helper()
+	m, _ := press(f.t, f.model())
+	m.marked = map[string]struct{}{}
+	for _, p := range sel {
+		m.marked[p] = struct{}{}
+	}
+	m, _ = press(f.t, m, "c")
+	if m.mode != modeCommit {
+		f.t.Fatalf("commit of %v did not open the prompt; notice: %q", sel, m.notice.text)
+	}
+	m.commitInput.SetValue(message)
+	_, am := f.act(m, sel, "enter")
+	return am
+}
+
+func (f svnFixture) status() string {
+	f.t.Helper()
+	var b []string
+	for _, e := range f.model().entries {
+		b = append(b, string(e.Code)+" "+filepath.ToSlash(e.Path))
+	}
+	return strings.Join(b, "|")
+}
+
+// Each case here failed against real svn before: the arguments looked right
+// but svn read them differently.
+func TestSVNArgumentEdgeCases(t *testing.T) {
+	f := newSVNFixture(t)
+	f.write("icon@2x.png", "a\n")
+	f.write("keep.txt", "k\n")
+	f.write("moveme.txt", "m\n")
+	f.write("gone.txt", "g\n")
+	f.write("pdir/child.txt", "c\n")
+	f.svn("add", "-q", "--", "icon@2x.png@", "keep.txt", "moveme.txt", "gone.txt", "pdir")
+	f.svn("ci", "-q", "-m", "one")
+	t.Chdir(f.wc)
+
+	t.Run("at sign in a path is not a peg revision", func(t *testing.T) {
+		f := f.on(t)
+		f.write("icon@2x.png", "b\n")
+		if pm := diffCmd(1, "icon@2x.png")().(previewMsg); pm.result.err != nil || !strings.Contains(pm.result.stdout, "+b") {
+			t.Errorf("diff: %s", pm.result.transcript())
+		}
+		if pm := logCmd(1, "icon@2x.png")().(previewMsg); pm.result.err != nil {
+			t.Errorf("log: %s", pm.result.transcript())
+		}
+		if am := actionCmd(opRequest{op: opRevert, paths: []string{"icon@2x.png"}})().(actionMsg); am.result.err != nil {
+			t.Errorf("revert: %s", am.transcript())
+		}
+		f.write("icon@2x.png", "c\n")
+		f.commit([]string{"icon@2x.png"}, "at")
+		f.write("new@x.txt", "n\n")
+		if am := actionCmd(opRequest{op: opAdd, paths: []string{"new@x.txt"}})().(actionMsg); am.result.err != nil {
+			t.Errorf("add: %s", am.transcript())
+		}
+		f.svn("revert", "-q", "--", "new@x.txt@")
+		os.Remove("new@x.txt")
+	})
+
+	t.Run("revert an added directory with its children", func(t *testing.T) {
+		f := f.on(t)
+		f.write("nd/f.txt", "q\n")
+		f.svn("add", "-q", "nd")
+		m := f.model()
+		m.marked = map[string]struct{}{"nd": {}}
+		m, _ = press(t, m, "v")
+		if got := strings.Join(m.pendingPaths, ","); got != "nd,"+filepath.Join("nd", "f.txt") {
+			t.Errorf("revert listed %q", got)
+		}
+		_, _ = f.act(m, nil, "y")
+		if got := f.status(); got != "? nd" {
+			t.Errorf("status after revert = %q", got)
+		}
+		os.RemoveAll("nd")
+	})
+
+	t.Run("commit a missing file deletes it", func(t *testing.T) {
+		f := f.on(t)
+		os.Remove("gone.txt")
+		f.commit([]string{"gone.txt"}, "gone")
+		if got := f.status(); got != "" {
+			t.Errorf("status after commit = %q", got)
+		}
+	})
+
+	t.Run("message that names a file, non-ASCII under the C locale", func(t *testing.T) {
+		f := f.on(t)
+		t.Setenv("LC_ALL", "C")
+		t.Setenv("LANG", "")
+		f.write("keep.txt", "1\n")
+		f.commit([]string{"keep.txt"}, "keep.txt")
+		f.write("keep.txt", "2\n")
+		f.commit([]string{"keep.txt"}, "héllo ✓ -m --")
+		t.Setenv("LC_ALL", "en_US.UTF-8")
+		if out := f.svn("log", "-l", "1", "--xml", "keep.txt"); !strings.Contains(out, "<msg>héllo ✓ -m --</msg>") {
+			t.Errorf("log message not kept:\n%s", out)
+		}
+	})
+
+	t.Run("commit one side of a move", func(t *testing.T) {
+		f := f.on(t)
+		f.svn("mv", "-q", "moveme.txt", "moved.txt")
+		f.commit([]string{"moved.txt"}, "move")
+		if got := f.status(); got != "" {
+			t.Errorf("status after commit = %q", got)
+		}
+	})
+
+	t.Run("commit a file inside an added directory", func(t *testing.T) {
+		f := f.on(t)
+		f.write("adir/f.txt", "1\n")
+		f.write("adir/g.txt", "2\n")
+		f.svn("add", "-q", "adir")
+		f.commit([]string{filepath.Join("adir", "f.txt")}, "adir")
+		if got := f.status(); got != "" {
+			t.Errorf("status after commit = %q", got)
+		}
+	})
+
+	t.Run("directory diff shows only its own properties", func(t *testing.T) {
+		f := f.on(t)
+		f.svn("propset", "-q", "p", "v", "pdir")
+		f.write("pdir/child.txt", "changed\n")
+		pm := diffCmd(1, "pdir")().(previewMsg)
+		if pm.result.err != nil || !strings.Contains(pm.result.stdout, "Property changes on: pdir") || strings.Contains(pm.result.stdout, "child.txt") {
+			t.Errorf("diff of pdir:\n%s", pm.result.transcript())
+		}
+		m, _ := press(t, f.model())
+		m.marked = map[string]struct{}{"pdir": {}}
+		m, _ = press(t, m, "c")
+		if want := []string{"pdir", filepath.Join("pdir", "child.txt")}; !slices.Equal(m.pendingPaths, want) {
+			t.Errorf("commit listed %v, want %v", m.pendingPaths, want)
+		}
+	})
+}
+
+func TestExpandTargets(t *testing.T) {
+	m := loaded(
+		statusEntry{Code: 'A', Path: "adir"},
+		statusEntry{Code: 'A', Path: "adir/f"},
+		statusEntry{Code: 'A', Path: "adir/g"},
+		statusEntry{Code: '?', Path: "adir/u"},
+		statusEntry{Code: '!', Path: "gone"},
+		statusEntry{Code: 'A', Path: "new", MovedFrom: "old"},
+		statusEntry{Code: 'D', Path: "old", MovedTo: "new"},
+		statusEntry{Code: 'M', Path: "pdir"},
+		statusEntry{Code: 'M', Path: "pdir-x"},
+		statusEntry{Code: 'M', Path: "pdir/c"},
+		statusEntry{Code: '?', Path: "u"},
+		statusEntry{Code: 'A', Path: `w`},
+		statusEntry{Code: 'A', Path: `w\f`},
+		statusEntry{Code: 'M', Path: `w\g`},
+	)
+	cases := []struct {
+		sel       []string
+		forCommit bool
+		want      string
+	}{
+		{[]string{"pdir"}, false, "pdir,pdir/c"},
+		{[]string{"adir/f"}, true, "adir,adir/f,adir/g"},
+		{[]string{"adir/f"}, false, "adir/f"},
+		{[]string{"new"}, true, "new,old"},
+		{[]string{"old"}, false, "new,old"},
+		{[]string{`w\f`}, true, `w,w\f,w\g`},
+		{[]string{"."}, false, ".,adir,adir/f,adir/g,gone,new,old,pdir,pdir-x,pdir/c,w,w\\f,w\\g"},
+	}
+	for _, c := range cases {
+		if got := strings.Join(m.expandTargets(c.sel, c.forCommit), ","); got != c.want {
+			t.Errorf("expandTargets(%v, %v) = %s, want %s", c.sel, c.forCommit, got, c.want)
+		}
+	}
+
+	m.marked = map[string]struct{}{"gone": {}, "u": {}, "pdir/c": {}}
+	targets, missing, skipped := m.commitTargets()
+	if strings.Join(targets, ",") != "gone,pdir/c" || strings.Join(missing, ",") != "gone" || skipped != 1 {
+		t.Errorf("commitTargets = %v, %v, %d", targets, missing, skipped)
+	}
+
+	m.marked = map[string]struct{}{"u": {}}
+	if m, cmd := press(t, m, "c"); m.mode != modeNormal || cmd != nil || !strings.Contains(m.notice.text, "press a") {
+		t.Errorf("commit of only unversioned files: mode %v, notice %q", m.mode, m.notice.text)
 	}
 }
 

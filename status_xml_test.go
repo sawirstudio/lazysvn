@@ -18,6 +18,8 @@ func parseStatusXMLReference(data []byte) ([]statusEntry, error) {
 			Item           string `xml:"item,attr"`
 			Props          string `xml:"props,attr"`
 			TreeConflicted string `xml:"tree-conflicted,attr"`
+			MovedFrom      string `xml:"moved-from,attr"`
+			MovedTo        string `xml:"moved-to,attr"`
 		} `xml:"wc-status"`
 	}
 	type xmlGroup struct {
@@ -34,7 +36,7 @@ func parseStatusXMLReference(data []byte) ([]statusEntry, error) {
 	var entries []statusEntry
 	add := func(e xmlEntry, cl string) {
 		ws := e.WCStatus
-		if r, ok := makeStatusEntry(e.Path, cl, []byte(ws.Item), []byte(ws.Props), []byte(ws.TreeConflicted)); ok {
+		if r, ok := makeStatusEntry(e.Path, cl, []byte(ws.Item), []byte(ws.Props), []byte(ws.TreeConflicted), ws.MovedFrom, ws.MovedTo); ok {
 			entries = append(entries, r)
 		}
 	}
@@ -75,6 +77,12 @@ func svnStatusDoc(paths []string, changelist string, seed int) string {
 		tc := ""
 		if (seed+i)%5 == 0 {
 			tc = "\n   tree-conflicted=\"true\""
+		}
+		switch (seed + i) % 3 {
+		case 1:
+			tc += "\n   moved-to=\"" + xmlAttr(p+".to") + "\""
+		case 2:
+			tc += "\n   moved-from=\"" + xmlAttr("from/"+p) + "\""
 		}
 		fmt.Fprintf(&b, "<entry\n   path=\"%s\">\n<wc-status\n   item=\"%s\"\n   props=\"%s\"%s>\n<commit\n   revision=\"3\">\n<author>a&lt;b&gt; &amp; c</author>\n<date>2026-11-06T02:29:11.142070Z</date>\n</commit>\n<lock><token>opaquelocktoken:x</token><owner>o</owner><comment>&quot;hi&quot;</comment></lock>\n</wc-status>\n<repos-status item=\"modified\" props=\"none\"/>\n</entry>\n", xmlAttr(p), item, props, tc)
 	}
