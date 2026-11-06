@@ -1,15 +1,16 @@
 name: release
 
+# Builds and publishes a release with GoReleaser (see .goreleaser.yaml).
+# Tags must be semver, e.g. v0.4.0.
+#
+# To re-run a release by hand, use "Run workflow" and pick the tag (not a
+# branch) under "Use workflow from": the release environment only accepts
+# v* tags.
 on:
   push:
     tags:
       - "v*"
   workflow_dispatch:
-    inputs:
-      tag:
-        description: "Tag to release (example: v0.1.0)"
-        required: true
-        type: string
 
 permissions:
   contents: write
@@ -17,71 +18,31 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    # Holds TAP_TOKEN and WINGET_TOKEN. Only v* tags may deploy to it and each
+    # run waits for a reviewer's approval before the tokens reach this job.
+    environment: release
 
     steps:
+      # Actions are pinned to commit SHAs so a moved tag can't change the code
+      # that runs next to the publishing tokens. The comment is the release.
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
           cache: true
 
-      - name: Resolve release tag
-        id: meta
-        run: |
-          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
-            TAG="${{ github.event.inputs.tag }}"
-          else
-            TAG="${GITHUB_REF_NAME}"
-          fi
-
-          if [ -z "${TAG}" ]; then
-            echo "release tag is empty" >&2
-            exit 1
-          fi
-
-          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
-
-      - name: Run tests
-        run: go test ./...
-
-      - name: Build release archives
-        env:
-          TAG: ${{ steps.meta.outputs.tag }}
-        run: |
-          set -eux
-          mkdir -p dist
-
-          while read -r GOOS GOARCH; do
-            [ -n "${GOOS}" ] || continue
-            PKG_DIR="dist/lazysvn_${TAG}_${GOOS}_${GOARCH}"
-            BIN_PATH="${PKG_DIR}/lazysvn"
-
-            mkdir -p "${PKG_DIR}"
-            CGO_ENABLED=0 GOOS="${GOOS}" GOARCH="${GOARCH}" go build -trimpath -ldflags "-s -w -X main.version=${TAG}" -o "${BIN_PATH}" .
-            cp README.md "${PKG_DIR}/README.md"
-            tar -C dist -czf "dist/lazysvn_${TAG}_${GOOS}_${GOARCH}.tar.gz" "lazysvn_${TAG}_${GOOS}_${GOARCH}"
-            rm -rf "${PKG_DIR}"
-          done <<'EOF'
-          linux amd64
-          linux arm64
-          darwin amd64
-          darwin arm64
-          EOF
-
-          (cd dist && sha256sum lazysvn_*.tar.gz > checksums.txt)
-
-      - name: Create or update GitHub release
-        uses: softprops/action-gh-release@v2
+      - name: Release
+        uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6.4.0
         with:
-          tag_name: ${{ steps.meta.outputs.tag }}
-          target_commitish: ${{ github.sha }}
-          name: ${{ steps.meta.outputs.tag }}
-          generate_release_notes: true
-          files: |
-            dist/lazysvn_*.tar.gz
-            dist/checksums.txt
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}

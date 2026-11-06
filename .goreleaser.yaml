@@ -1,0 +1,127 @@
+# Release pipeline: `git tag v0.4.0 && git push origin v0.4.0`.
+#
+# Produces archives for linux/darwin/windows on amd64/arm64 (used by
+# install.sh and install.ps1), deb/rpm/apk packages, and publishes to the
+# Homebrew tap, the Scoop bucket and winget. Each publisher is skipped when
+# its token is missing, and the GitHub release still goes out:
+#
+#   TAP_TOKEN     fine-grained token, Contents: read/write on
+#                 sawirricardo/homebrew-tap and sawirricardo/scoop-bucket only.
+#   WINGET_TOKEN  classic token with public_repo, used only to push to the
+#                 winget-pkgs fork and open the PR on microsoft/winget-pkgs
+#                 (fine-grained tokens can't open PRs on repos you don't own).
+#
+# Both live in the "release" GitHub Environment, which only v* tags can use.
+version: 2
+project_name: lazysvn
+
+before:
+  hooks:
+    - go test ./...
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    # lazysvn_0.4.0_linux_amd64.tar.gz: the shape install.sh and install.ps1 match.
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github-native
+
+nfpms:
+  - package_name: lazysvn
+    vendor: Sawir Studio
+    homepage: https://lazysvn.sawirstudio.com
+    maintainer: Ricardo Sawir <37329575+sawirricardo@users.noreply.github.com>
+    description: A LazyGit-style terminal UI for Subversion (SVN).
+    license: MIT
+    formats: [deb, rpm, apk]
+    bindir: /usr/bin
+    recommends:
+      - subversion
+    file_name_template: "{{ .ConventionalFileName }}"
+
+homebrew_casks:
+  - name: lazysvn
+    binaries: [lazysvn]
+    homepage: https://lazysvn.sawirstudio.com
+    description: LazyGit-style terminal UI for Subversion (SVN)
+    license: MIT
+    dependencies:
+      - formula: subversion
+    # The binary is not signed or notarized; without this macOS refuses to
+    # run it ("lazysvn is damaged and can't be opened").
+    hooks:
+      post:
+        install_steps: |
+          on_macos do
+            run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/lazysvn"]
+          end
+    repository:
+      owner: sawirricardo
+      name: homebrew-tap
+      token: "{{ .Env.TAP_TOKEN }}"
+    commit_msg_template: "lazysvn: {{ .Tag }}"
+    skip_upload: '{{ if isEnvSet "TAP_TOKEN" }}auto{{ else }}true{{ end }}'
+
+scoops:
+  - name: lazysvn
+    homepage: https://lazysvn.sawirstudio.com
+    description: LazyGit-style terminal UI for Subversion (SVN).
+    license: MIT
+    repository:
+      owner: sawirricardo
+      name: scoop-bucket
+      token: "{{ .Env.TAP_TOKEN }}"
+    commit_msg_template: "lazysvn: {{ .Tag }}"
+    skip_upload: '{{ if isEnvSet "TAP_TOKEN" }}auto{{ else }}true{{ end }}'
+
+winget:
+  - name: lazysvn
+    package_identifier: SawirStudio.LazySVN
+    package_name: LazySVN
+    publisher: Sawir Studio
+    publisher_url: https://lazysvn.sawirstudio.com
+    publisher_support_url: https://github.com/sawirricardo/lazysvn/issues
+    author: Ricardo Sawir
+    short_description: LazyGit-style terminal UI for Subversion (SVN).
+    description: |
+      LazySVN is a keyboard-driven terminal UI for Subversion working copies:
+      browse svn status, view side-by-side diffs and logs, mark files, and run
+      commit, add, revert and update without leaving the terminal.
+      Requires the svn command-line client on PATH.
+    homepage: https://lazysvn.sawirstudio.com
+    license: MIT
+    license_url: https://github.com/sawirricardo/lazysvn/blob/main/LICENSE
+    release_notes_url: https://github.com/sawirricardo/lazysvn/releases/tag/{{ .Tag }}
+    tags: [svn, subversion, tui, cli, terminal, version-control]
+    repository:
+      owner: sawirricardo
+      name: winget-pkgs
+      branch: "lazysvn-{{ .Version }}"
+      token: "{{ .Env.WINGET_TOKEN }}"
+      pull_request:
+        enabled: true
+        base:
+          owner: microsoft
+          name: winget-pkgs
+          branch: master
+    skip_upload: '{{ if isEnvSet "WINGET_TOKEN" }}auto{{ else }}true{{ end }}'
