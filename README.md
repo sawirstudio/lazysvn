@@ -2,32 +2,60 @@
 
 A lightweight, LazyGit-style terminal UI for Subversion (SVN), written in Go.
 
-## Quick install (curl | sh)
+LazySVN drives the `svn` command-line client, so you need one on your `PATH`
+(Homebrew and the Linux packages pull it in for you).
+
+## Install
+
+| Platform | Command |
+|---|---|
+| macOS / Linux | `curl -fsSL https://lazysvn.sawirstudio.com/install.sh \| sh` |
+| Windows (PowerShell) | `irm https://lazysvn.sawirstudio.com/install.ps1 \| iex` |
+| Homebrew (macOS / Linux) | `brew install sawirricardo/tap/lazysvn` |
+| winget | `winget install SawirStudio.LazySVN` |
+| Scoop | `scoop bucket add sawirricardo https://github.com/sawirricardo/scoop-bucket`<br>`scoop install lazysvn` |
+| Debian / Ubuntu | `sudo apt install ./lazysvn_<version>_amd64.deb` (from [Releases](https://github.com/sawirricardo/lazysvn/releases)) |
+| Fedora / RHEL | `sudo dnf install ./lazysvn-<version>-1.x86_64.rpm` |
+| Alpine | `sudo apk add --allow-untrusted ./lazysvn_<version>_x86_64.apk` |
+| Go | `go install github.com/sawirricardo/lazysvn@latest` |
+
+Prebuilt binaries for linux, macOS and Windows on amd64 and arm64 are attached
+to every [release](https://github.com/sawirricardo/lazysvn/releases) along with
+`checksums.txt`.
+
+The install scripts take options as environment variables:
 
 ```bash
-curl -fsSL https://lazysvn.sawirstudio.com/install.sh | sh
-```
-
-Optional:
-
-```bash
-# Install to custom dir
+# Install to a custom directory
 curl -fsSL https://lazysvn.sawirstudio.com/install.sh | INSTALL_DIR=/usr/local/bin sh
 
-# Install specific tag
-curl -fsSL https://lazysvn.sawirstudio.com/install.sh | VERSION=v0.1.0 sh
+# Install a specific tag
+curl -fsSL https://lazysvn.sawirstudio.com/install.sh | VERSION=v0.4.0 sh
 ```
 
-`install.sh` installs a matching prebuilt binary from GitHub Releases for your OS/architecture.
-If no matching binary exists for your platform, install exits with an error.
+```powershell
+$env:VERSION = 'v0.4.0'; irm https://lazysvn.sawirstudio.com/install.ps1 | iex
+```
 
-After install, you can self-update from the CLI:
+`install.ps1` installs to `%LOCALAPPDATA%\Programs\lazysvn`, adds it to your
+user `PATH`, and verifies the download against `checksums.txt`.
+
+### Updating and uninstalling
+
+Use the tool you installed with: `brew upgrade lazysvn`, `winget upgrade
+SawirStudio.LazySVN`, `scoop update lazysvn`, or your system package manager.
+
+Installs made with the curl or PowerShell scripts can update and remove
+themselves:
 
 ```bash
-lazysvn update
-# or pin to a specific tag
-lazysvn update v0.1.0
+lazysvn update          # latest release
+lazysvn update v0.4.0   # a specific tag
+lazysvn uninstall
 ```
+
+If `lazysvn update` or `lazysvn uninstall` finds that a package manager owns
+the binary, it prints that package manager's command instead of touching it.
 
 ## What it does
 
@@ -37,55 +65,19 @@ lazysvn update v0.1.0
 - Marks multiple files for actions
 - Runs `svn commit`, `svn add`, `svn revert`, and `svn update`
 
-## Run
+Run `lazysvn` from inside an SVN working copy.
+
+## Develop
 
 ```bash
-go mod tidy
 go run .
+go test ./...
+go test -run '^$' -bench . -benchmem   # hot-path benchmarks
 ```
 
-Run it from inside an SVN working copy.
-
-## Homebrew install
-
-You can install via a Homebrew tap.
-
-1. Create a tap repo (once), e.g. `sawirricardo/homebrew-tap`
-2. Add the formula from [`packaging/homebrew/lazysvn.rb`](packaging/homebrew/lazysvn.rb) to that tap as `Formula/lazysvn.rb`
-3. Install:
-
-```bash
-brew tap sawirricardo/tap
-brew install --HEAD lazysvn
-```
-
-Then run from any SVN working copy:
-
-```bash
-lazysvn
-```
-
-## Uninstall
-
-From the CLI:
-
-```bash
-lazysvn uninstall
-```
-
-If you installed with `curl | sh`, remove the binary from your install directory:
-
-```bash
-rm -f "$HOME/.local/bin/lazysvn"
-```
-
-If you installed to a custom directory, remove that binary path instead.
-
-If you installed with Homebrew:
-
-```bash
-brew uninstall lazysvn
-```
+Releases are built by [GoReleaser](https://goreleaser.com) from
+`.goreleaser.yaml` when a `v*` tag is pushed. Try the whole pipeline locally
+with `goreleaser release --snapshot --clean`.
 
 ## Keybindings
 

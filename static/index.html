@@ -771,21 +771,28 @@ footer a:hover { color: var(--accent); }
     <div class="section-title reveal reveal-delay-1">Up and running<br>in one command.</div>
     <div class="install-grid reveal reveal-delay-2">
       <div class="install-card">
-        <h3>Quick Install</h3>
-        <p class="install-desc">Downloads a prebuilt binary for your OS. Falls back to building from source.</p>
+        <h3>macOS &amp; Linux</h3>
+        <p class="install-desc">Downloads the prebuilt binary for your OS and architecture into ~/.local/bin.</p>
         <pre><span class="cmd-prompt">$</span> curl -fsSL https://lazysvn.sawirstudio.com/install.sh | sh</pre>
       </div>
       <div class="install-card">
-        <h3>Homebrew</h3>
-        <p class="install-desc">Install via Homebrew tap on macOS or Linux.</p>
-        <pre><span class="cmd-prompt">$</span> brew tap sawirricardo/tap
-<span class="cmd-prompt">$</span> brew install --HEAD lazysvn</pre>
+        <h3>Windows</h3>
+        <p class="install-desc">PowerShell installer, or your package manager of choice.</p>
+        <pre><span class="cmd-prompt">&gt;</span> irm https://lazysvn.sawirstudio.com/install.ps1 | iex
+<span class="cmd-prompt">&gt;</span> winget install SawirStudio.LazySVN
+<span class="cmd-prompt">&gt;</span> scoop bucket add sawirricardo https://github.com/sawirricardo/scoop-bucket
+<span class="cmd-prompt">&gt;</span> scoop install lazysvn</pre>
       </div>
       <div class="install-card">
-        <h3>From Source</h3>
-        <p class="install-desc">Build from source with Go 1.21+.</p>
-        <pre><span class="cmd-prompt">$</span> git clone https://github.com/sawirricardo/lazysvn
-<span class="cmd-prompt">$</span> cd lazysvn && go install .</pre>
+        <h3>Homebrew</h3>
+        <p class="install-desc">macOS or Linux. Pulls in Subversion if you don't have it.</p>
+        <pre><span class="cmd-prompt">$</span> brew install sawirricardo/tap/lazysvn</pre>
+      </div>
+      <div class="install-card">
+        <h3>Linux packages &amp; Go</h3>
+        <p class="install-desc">.deb, .rpm and .apk packages are attached to every <a href="https://github.com/sawirricardo/lazysvn/releases">release</a>.</p>
+        <pre><span class="cmd-prompt">$</span> sudo apt install ./lazysvn_*_amd64.deb
+<span class="cmd-prompt">$</span> go install github.com/sawirricardo/lazysvn@latest</pre>
       </div>
       <div class="install-card">
         <h3>Run</h3>
