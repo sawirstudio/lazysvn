@@ -2,7 +2,7 @@
 set -eu
 
 BINARY_NAME="lazysvn"
-REPO="${LAZYSVN_REPO:-sawirricardo/lazysvn}"
+REPO="${LAZYSVN_REPO:-sawirstudio/lazysvn}"
 VERSION="${VERSION:-latest}"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 GITHUB_TOKEN="${GITHUB_TOKEN:-}"
@@ -17,7 +17,7 @@ Usage:
 Options via environment variables:
   VERSION=<tag>            Install a specific release tag (default: latest)
   INSTALL_DIR=<path>       Install directory (default: \$HOME/.local/bin)
-  LAZYSVN_REPO=<owner/repo>  Release source repo (default: sawirricardo/lazysvn)
+  LAZYSVN_REPO=<owner/repo>  Release source repo (default: sawirstudio/lazysvn)
   GITHUB_TOKEN=<token>     Optional token to avoid GitHub API rate limits
 EOF
 }

@@ -6,7 +6,7 @@
 # its token is missing, and the GitHub release still goes out:
 #
 #   TAP_TOKEN     fine-grained token, Contents: read/write on
-#                 sawirricardo/homebrew-tap and sawirricardo/scoop-bucket only.
+#                 sawirstudio/homebrew-tap and sawirstudio/scoop-bucket only.
 #   WINGET_TOKEN  classic token with public_repo, used only to push to the
 #                 winget-pkgs fork and open the PR on microsoft/winget-pkgs
 #                 (fine-grained tokens can't open PRs on repos you don't own).
@@ -76,7 +76,7 @@ homebrew_casks:
             run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/lazysvn"]
           end
     repository:
-      owner: sawirricardo
+      owner: sawirstudio
       name: homebrew-tap
       token: "{{ .Env.TAP_TOKEN }}"
     commit_msg_template: "lazysvn: {{ .Tag }}"
@@ -88,7 +88,7 @@ scoops:
     description: LazyGit-style terminal UI for Subversion (SVN).
     license: MIT
     repository:
-      owner: sawirricardo
+      owner: sawirstudio
       name: scoop-bucket
       token: "{{ .Env.TAP_TOKEN }}"
     commit_msg_template: "lazysvn: {{ .Tag }}"
@@ -100,7 +100,7 @@ winget:
     package_name: LazySVN
     publisher: Sawir Studio
     publisher_url: https://lazysvn.sawirstudio.com
-    publisher_support_url: https://github.com/sawirricardo/lazysvn/issues
+    publisher_support_url: https://github.com/sawirstudio/lazysvn/issues
     author: Ricardo Sawir
     short_description: LazyGit-style terminal UI for Subversion (SVN).
     description: |
@@ -110,10 +110,12 @@ winget:
       Requires the svn command-line client on PATH.
     homepage: https://lazysvn.sawirstudio.com
     license: MIT
-    license_url: https://github.com/sawirricardo/lazysvn/blob/main/LICENSE
-    release_notes_url: https://github.com/sawirricardo/lazysvn/releases/tag/{{ .Tag }}
+    license_url: https://github.com/sawirstudio/lazysvn/blob/main/LICENSE
+    release_notes_url: https://github.com/sawirstudio/lazysvn/releases/tag/{{ .Tag }}
     tags: [svn, subversion, tui, cli, terminal, version-control]
     repository:
+      # The fork only carries pull requests, so it stays on the personal
+      # account that WINGET_TOKEN belongs to.
       owner: sawirricardo
       name: winget-pkgs
       branch: "lazysvn-{{ .Version }}"

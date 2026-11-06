@@ -11,16 +11,16 @@ LazySVN drives the `svn` command-line client, so you need one on your `PATH`
 |---|---|
 | macOS / Linux | `curl -fsSL https://lazysvn.sawirstudio.com/install.sh \| sh` |
 | Windows (PowerShell) | `irm https://lazysvn.sawirstudio.com/install.ps1 \| iex` |
-| Homebrew (macOS / Linux) | `brew install sawirricardo/tap/lazysvn` |
+| Homebrew (macOS / Linux) | `brew install sawirstudio/tap/lazysvn` |
 | winget | `winget install SawirStudio.LazySVN` |
-| Scoop | `scoop bucket add sawirricardo https://github.com/sawirricardo/scoop-bucket`<br>`scoop install lazysvn` |
-| Debian / Ubuntu | `sudo apt install ./lazysvn_<version>_amd64.deb` (from [Releases](https://github.com/sawirricardo/lazysvn/releases)) |
+| Scoop | `scoop bucket add sawirstudio https://github.com/sawirstudio/scoop-bucket`<br>`scoop install lazysvn` |
+| Debian / Ubuntu | `sudo apt install ./lazysvn_<version>_amd64.deb` (from [Releases](https://github.com/sawirstudio/lazysvn/releases)) |
 | Fedora / RHEL | `sudo dnf install ./lazysvn-<version>-1.x86_64.rpm` |
 | Alpine | `sudo apk add --allow-untrusted ./lazysvn_<version>_x86_64.apk` |
-| Go | `go install github.com/sawirricardo/lazysvn@latest` |
+| Go | `go install github.com/sawirstudio/lazysvn@latest` |
 
 Prebuilt binaries for linux, macOS and Windows on amd64 and arm64 are attached
-to every [release](https://github.com/sawirricardo/lazysvn/releases) along with
+to every [release](https://github.com/sawirstudio/lazysvn/releases) along with
 `checksums.txt`.
 
 The install scripts take options as environment variables:

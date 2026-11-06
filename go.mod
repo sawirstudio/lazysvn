@@ -1,4 +1,4 @@
-module github.com/sawirricardo/lazysvn
+module github.com/sawirstudio/lazysvn
 
 go 1.27
 

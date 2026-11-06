@@ -5,7 +5,7 @@
 # Options via environment variables:
 #   VERSION=<tag>              Install a specific release tag (default: latest)
 #   INSTALL_DIR=<path>         Install directory (default: %LOCALAPPDATA%\Programs\lazysvn)
-#   LAZYSVN_REPO=<owner/repo>  Release source repo (default: sawirricardo/lazysvn)
+#   LAZYSVN_REPO=<owner/repo>  Release source repo (default: sawirstudio/lazysvn)
 #   GITHUB_TOKEN=<token>       Optional token to avoid GitHub API rate limits
 #
 # Works on Windows PowerShell 5.1 and PowerShell 7. Everything runs inside a
@@ -20,7 +20,7 @@ function Install-LazySVN {
     # Windows PowerShell 5.1 may not offer TLS 1.2 by default; GitHub requires it.
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
-    $repo = if ($env:LAZYSVN_REPO) { $env:LAZYSVN_REPO } else { 'sawirricardo/lazysvn' }
+    $repo = if ($env:LAZYSVN_REPO) { $env:LAZYSVN_REPO } else { 'sawirstudio/lazysvn' }
     $version = if ($env:VERSION) { $env:VERSION } else { 'latest' }
     $installDir = if ($env:INSTALL_DIR) { $env:INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'Programs\lazysvn' }
 
