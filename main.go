@@ -1,13 +1,8 @@
 package main
 
 import (
-	"bytes"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"regexp"
 	"runtime/debug"
 	"strings"
@@ -193,7 +188,11 @@ Examples:
 
 Env:
   INSTALL_DIR            Override install target directory
-  LAZYSVN_INSTALL_URL    Override installer URL (default: https://lazysvn.sawirstudio.com/install.sh)
+  LAZYSVN_INSTALL_URL    Override installer URL (default: https://lazysvn.sawirstudio.com/install.sh,
+                         or install.ps1 on Windows)
+
+Installs made by Homebrew, Scoop, winget or a Linux package are updated
+with that package manager instead; lazysvn update tells you the command.
 	`)
 }
 
@@ -204,86 +203,7 @@ Usage:
 
 Notes:
   - Removes the currently running lazysvn binary.
-  - For Homebrew installs, run: brew uninstall lazysvn
+  - Installs made by Homebrew, Scoop, winget or a Linux package are removed
+    with that package manager instead; lazysvn uninstall tells you the command.
 	`)
-}
-
-func runSelfUpdate(version string) error {
-	installURL := strings.TrimSpace(os.Getenv("LAZYSVN_INSTALL_URL"))
-	if installURL == "" {
-		installURL = "https://lazysvn.sawirstudio.com/install.sh"
-	}
-
-	req, err := http.NewRequest(http.MethodGet, installURL, nil)
-	if err != nil {
-		return fmt.Errorf("create installer request: %w", err)
-	}
-	req.Header.Set("User-Agent", "lazysvn-self-update")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("fetch installer: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("installer request failed: %s %s", resp.Status, strings.TrimSpace(string(body)))
-	}
-
-	script, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("read installer: %w", err)
-	}
-	if len(script) == 0 {
-		return fmt.Errorf("installer script is empty")
-	}
-
-	installDir := strings.TrimSpace(os.Getenv("INSTALL_DIR"))
-	if installDir == "" {
-		exePath, err := os.Executable()
-		if err == nil {
-			installDir = filepath.Dir(exePath)
-		}
-	}
-
-	fmt.Printf("Updating lazysvn to %s...\n", version)
-	cmd := exec.Command("sh")
-	cmd.Stdin = bytes.NewReader(script)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Env = append(os.Environ(), "VERSION="+version)
-	if strings.TrimSpace(os.Getenv("INSTALL_DIR")) == "" && installDir != "" {
-		cmd.Env = append(cmd.Env, "INSTALL_DIR="+installDir)
-	}
-
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("run installer: %w", err)
-	}
-
-	fmt.Println("Update complete.")
-	return nil
-}
-
-func runSelfUninstall() error {
-	exePath, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("resolve executable path: %w", err)
-	}
-
-	resolvedPath := exePath
-	if p, err := filepath.EvalSymlinks(exePath); err == nil && p != "" {
-		resolvedPath = p
-	}
-
-	if strings.Contains(exePath, "/Cellar/") || strings.Contains(resolvedPath, "/Cellar/") {
-		return fmt.Errorf("detected Homebrew-managed install (%s). Run: brew uninstall lazysvn", exePath)
-	}
-
-	if err := os.Remove(exePath); err != nil {
-		return fmt.Errorf("remove %s: %w", exePath, err)
-	}
-
-	fmt.Printf("Removed %s\n", exePath)
-	return nil
 }
