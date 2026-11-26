@@ -1,0 +1,64 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - "**"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install build and test dependencies
+        shell: bash
+        run: |
+          if ! command -v svn || ! command -v svnadmin || ! command -v zip; then
+            sudo apt-get update
+            sudo apt-get install --yes --no-install-recommends subversion zip
+          fi
+
+      - name: Test
+        run: go test -count=1 ./...
+
+      - name: Build and package binaries
+        shell: bash
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          output="$RUNNER_TEMP/lazysvn-ci-artifacts"
+          mkdir -p "$output"
+          for os in linux darwin windows; do
+            for arch in amd64 arm64; do
+              name="lazysvn_${os}_${arch}"
+              build_dir="$RUNNER_TEMP/$name"
+              mkdir -p "$build_dir"
+              if [[ "$os" == windows ]]; then
+                GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags="-s -w" -o "$build_dir/lazysvn.exe" .
+                zip -j "$output/$name.zip" "$build_dir/lazysvn.exe"
+              else
+                GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags="-s -w" -o "$build_dir/lazysvn" .
+                tar -czf "$output/$name.tar.gz" -C "$build_dir" lazysvn
+              fi
+            done
+          done
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: lazysvn-${{ github.sha }}
+          path: ${{ runner.temp }}/lazysvn-ci-artifacts/
+          if-no-files-found: error

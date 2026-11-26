@@ -15,6 +15,8 @@ import (
 //	              commit  ──esc──────────────────────▶ normal
 //	normal ──v──▶ confirmRevert ──y──────────────────▶ normal (+ revert op)
 //	              confirmRevert ──n / esc / q─────────▶ normal
+//	normal ──/──▶ filter ──enter / esc───────────────▶ normal
+//	normal ──V──▶ selectRange ──V / space / esc──────▶ normal
 //
 // ctrl+c quits from every mode.
 type mode int
@@ -23,6 +25,8 @@ const (
 	modeNormal mode = iota
 	modeCommit
 	modeConfirmRevert
+	modeFilter
+	modeSelectRange
 )
 
 // opKind is a working-copy-changing svn operation. At most one runs at a time
@@ -78,6 +82,9 @@ type preview struct {
 	path  string   // file a diff/log belongs to
 	lines []string // plain text, used when diff is nil
 	diff  *diffDoc // prepared diff for a successful previewDiff
+	// scroll is how many body rows the preview is scrolled down. It lives with
+	// the content, so replacing the preview starts the new one at the top.
+	scroll int
 }
 
 func (p preview) withText(s string) preview {
@@ -100,11 +107,18 @@ type notice struct {
 }
 
 type model struct {
-	entries []statusEntry
-	cursor  int
-	marked  map[string]struct{}
+	entries     []statusEntry
+	cursor      int
+	marked      map[string]struct{}
+	filter      changeFilter
+	sortOrder   sortOrder
+	visibleRows []int // indices into entries, in display order
+
+	filterInputs [filterFieldCount]textinput.Model
+	filterField  int
 
 	mode         mode
+	rangeAnchor  int      // visible row where range selection began
 	pendingPaths []string // targets captured when entering commit/confirmRevert
 	pendingMiss  []string // commit: pendingPaths that are missing ('!')
 	pendingNote  string
@@ -116,6 +130,7 @@ type model struct {
 	// showing a diff for a file the cursor has already left.
 	previewSeq     int
 	previewLoading previewKind // kind being loaded; meaningful only if loadingPreview
+	previewPath    string      // path being loaded; meaningful only if loadingPreview
 	loadingPreview bool
 	followDiff     bool // cursor moves re-diff the file under the cursor
 
@@ -154,13 +169,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		if m.mode == modeFilter {
+			m.resizeFilterInputs()
+		}
 		return m, nil
 	case statusMsg:
-		return m.onStatus(msg), nil
+		prev := m.currentPath()
+		m = m.onStatus(msg)
+		if msg.seq == m.statusSeq && msg.err == nil && m.usesVisibleRows() {
+			cmd := m.syncVisiblePreview(prev)
+			return m, cmd
+		}
+		return m, nil
 	case previewMsg:
 		return m.onPreview(msg), nil
 	case actionMsg:
 		return m.onAction(msg)
+	case tea.MouseMsg:
+		return m.onMouse(msg)
 	case tea.KeyMsg:
 		if msg.String() == "ctrl+c" {
 			return m, tea.Quit
@@ -170,13 +196,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateCommit(msg)
 		case modeConfirmRevert:
 			return m.updateConfirmRevert(msg)
+		case modeFilter:
+			return m.updateFilter(msg)
 		default:
-			return m.updateNormal(msg)
+			return m.updateChanges(msg)
 		}
 	}
 	if m.mode == modeCommit { // e.g. cursor blink
 		var cmd tea.Cmd
 		m.commitInput, cmd = m.commitInput.Update(msg)
+		return m, cmd
+	}
+	if m.mode == modeFilter {
+		cmd := m.updateFilterInput(msg)
 		return m, cmd
 	}
 	return m, nil
@@ -201,10 +233,14 @@ func (m model) onStatus(msg statusMsg) model {
 	}
 
 	m.statusErr = nil
+	if m.mode == modeSelectRange {
+		// The anchor refers to the visible rows from before this refresh.
+		m.mode = modeNormal
+	}
 	prev := m.currentPath()
 	m.entries = msg.entries
 	m.pruneMarks()
-	m.cursor = m.indexOf(prev, m.cursor)
+	m.rebuildVisibleRows(prev)
 	return m
 }
 
@@ -213,6 +249,7 @@ func (m model) onPreview(msg previewMsg) model {
 		return m
 	}
 	m.loadingPreview = false
+	m.previewPath = ""
 	p := preview{kind: msg.kind, path: msg.path}
 	switch msg.kind {
 	case previewDiff:
@@ -253,10 +290,11 @@ func (m model) onAction(msg actionMsg) (model, tea.Cmd) {
 
 // ---- key handling ---------------------------------------------------------
 
-func (m model) updateNormal(msg tea.KeyMsg) (model, tea.Cmd) {
+func (m model) updateChanges(msg tea.KeyMsg) (model, tea.Cmd) {
 	m.notice = notice{}
+	key := msg.String()
 
-	switch msg.String() {
+	switch key {
 	case "q":
 		return m, tea.Quit
 	case "up", "k":
@@ -269,17 +307,47 @@ func (m model) updateNormal(msg tea.KeyMsg) (model, tea.Cmd) {
 		m.cursor = 0
 		return m, m.followCursor()
 	case "G", "end":
-		m.cursor = max(0, len(m.entries)-1)
+		m.cursor = max(0, m.visibleCount()-1)
 		return m, m.followCursor()
+	}
+
+	if m.mode == modeSelectRange {
+		switch key {
+		case "V", " ":
+			m.markRange()
+			m.mode = modeNormal
+		case "esc":
+			m.mode = modeNormal
+		}
+		return m, nil
+	}
+
+	switch key {
+	case "tab":
+		m.toggleSortOrder()
+		return m, nil
+	case "V":
+		if m.visibleCount() > 0 {
+			m.rangeAnchor = m.cursor
+			m.mode = modeSelectRange
+		}
+		return m, nil
 	case " ":
 		m.toggleMark()
 		return m, nil
 	case "esc":
+		if m.filter.active() {
+			cmd := m.applyFilter(changeFilter{})
+			return m, cmd
+		}
 		if n := len(m.marked); n > 0 {
 			m.marked = map[string]struct{}{}
 			m.setNotice(noticeInfo, fmt.Sprintf("Cleared %d mark(s).", n))
 		}
 		return m, nil
+	case "/":
+		cmd := m.openFilter()
+		return m, cmd
 	case "h", "?":
 		m.followDiff = false
 		m.showPreview(preview{kind: previewHelp, title: "Help"}.withText(helpText()))
@@ -288,14 +356,14 @@ func (m model) updateNormal(msg tea.KeyMsg) (model, tea.Cmd) {
 
 	// Everything below runs svn, so it waits for a running operation.
 	if m.running != opNone {
-		switch msg.String() {
+		switch key {
 		case "r", "enter", "d", "l", "u", "a", "v", "c":
 			m.setNotice(noticeError, fmt.Sprintf("svn %s is still running.", m.running))
 		}
 		return m, nil
 	}
 
-	switch msg.String() {
+	switch key {
 	case "r":
 		return m, m.refresh()
 	case "enter", "d":
@@ -393,6 +461,66 @@ func (m model) updateConfirmRevert(msg tea.KeyMsg) (model, tea.Cmd) {
 	return m, nil
 }
 
+// ---- mouse ----------------------------------------------------------------
+
+// wheelStep is how many rows one wheel notch scrolls.
+const wheelStep = 3
+
+// onMouse scrolls the pane under the pointer. Wheel events only arrive because
+// main.go enables cell-motion reporting: without it the terminal translates
+// the wheel into arrow keys, which moved the cursor no matter where the
+// pointer was.
+func (m model) onMouse(msg tea.MouseMsg) (model, tea.Cmd) {
+	if msg.Action != tea.MouseActionPress {
+		return m, nil // motion and release carry no scroll
+	}
+	var delta int
+	switch msg.Button {
+	case tea.MouseButtonWheelUp:
+		delta = -wheelStep
+	case tea.MouseButtonWheelDown:
+		delta = wheelStep
+	default:
+		return m, nil
+	}
+	if m.width == 0 || m.height == 0 || (m.mode != modeNormal && m.mode != modeSelectRange) {
+		return m, nil
+	}
+	l := m.layout()
+	switch {
+	case l.changes.rect.contains(msg.X, msg.Y):
+		// The list scrolls by moving the cursor, exactly like the arrow keys.
+		m.notice = notice{}
+		m.moveCursor(delta)
+		return m, m.followCursor()
+	case l.preview.rect.contains(msg.X, msg.Y):
+		m.notice = notice{}
+		m.scrollPreview(delta)
+	}
+	return m, nil
+}
+
+// previewBodyRows is the number of scrollable preview rows: the pane text
+// height minus the title line.
+func (m model) previewBodyRows() int {
+	return max(0, m.layout().preview.textHeight()-1)
+}
+
+// scrollPreview moves the preview by delta rows, clamped to its content.
+func (m *model) scrollPreview(delta int) {
+	rows := m.previewBodyRows()
+	if rows <= 0 {
+		m.preview.scroll = 0
+		return
+	}
+	l := m.layout()
+	maxOffset := max(0, len(m.preview.lines)-rows)
+	if m.preview.kind == previewDiff && m.preview.diff != nil {
+		maxOffset = diffMaxOffset(m.preview.diff, l.preview.textWidth(), rows)
+	}
+	m.preview.scroll = clamp(m.preview.scroll+delta, 0, maxOffset)
+}
+
 // ---- transitions ----------------------------------------------------------
 
 func (m *model) leaveMode() {
@@ -407,15 +535,21 @@ func (m *model) setNotice(level noticeLevel, text string) {
 
 // showPreview replaces the pane immediately and invalidates in-flight requests.
 func (m *model) showPreview(p preview) {
+	m.cancelPreviewRequest()
+	m.preview = p
+}
+
+func (m *model) cancelPreviewRequest() {
 	m.previewSeq++
 	m.loadingPreview = false
-	m.preview = p
+	m.previewPath = ""
 }
 
 func (m *model) requestPreview(kind previewKind, path string, cmd func(int, string) tea.Cmd) tea.Cmd {
 	m.previewSeq++
 	m.loadingPreview = true
 	m.previewLoading = kind
+	m.previewPath = path
 	return cmd(m.previewSeq, path)
 }
 
@@ -472,7 +606,18 @@ func (m *model) startOp(req opRequest) tea.Cmd {
 // ---- selection ------------------------------------------------------------
 
 func (m *model) moveCursor(delta int) {
-	m.cursor = clamp(m.cursor+delta, 0, len(m.entries)-1)
+	m.cursor = clamp(m.cursor+delta, 0, m.visibleCount()-1)
+}
+
+func (m model) rangeBounds() (first, last int) {
+	return min(m.rangeAnchor, m.cursor), max(m.rangeAnchor, m.cursor)
+}
+
+func (m *model) markRange() {
+	first, last := m.rangeBounds()
+	for row := first; row <= last; row++ {
+		m.marked[m.visibleEntry(row).Path] = struct{}{}
+	}
 }
 
 func (m *model) toggleMark() {
@@ -506,10 +651,10 @@ func (m *model) pruneMarks() {
 }
 
 func (m model) currentEntry() (statusEntry, bool) {
-	if m.cursor < 0 || m.cursor >= len(m.entries) {
+	if m.cursor < 0 || m.cursor >= m.visibleCount() {
 		return statusEntry{}, false
 	}
-	return m.entries[m.cursor], true
+	return m.visibleEntry(m.cursor), true
 }
 
 func (m model) currentPath() string {
@@ -517,25 +662,26 @@ func (m model) currentPath() string {
 	return e.Path
 }
 
-// indexOf finds path in entries, falling back to the clamped old index.
-func (m model) indexOf(path string, fallback int) int {
-	for i, e := range m.entries {
-		if e.Path == path {
-			return i
-		}
-	}
-	return clamp(fallback, 0, len(m.entries)-1)
-}
-
-// selectedTargets is the marked paths if any, else the file under the cursor.
+// selectedTargets is the visible marked paths if any, else the file under the cursor.
 func (m model) selectedTargets() []string {
 	if len(m.marked) > 0 {
 		targets := make([]string, 0, len(m.marked))
-		for p := range m.marked {
-			targets = append(targets, p)
+		if m.filter.active() {
+			for _, i := range m.visibleRows {
+				path := m.entries[i].Path
+				if _, ok := m.marked[path]; ok {
+					targets = append(targets, path)
+				}
+			}
+		} else {
+			for path := range m.marked {
+				targets = append(targets, path)
+			}
 		}
-		sort.Strings(targets)
-		return targets
+		if len(targets) > 0 {
+			sort.Strings(targets)
+			return targets
+		}
 	}
 	if p := m.currentPath(); p != "" {
 		return []string{p}

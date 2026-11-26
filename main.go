@@ -16,23 +16,39 @@ var pseudoVersionRE = regexp.MustCompile(`^v\d+\.\d+\.\d+-\d{14}-[0-9a-f]{12,}(?
 var version = "dev"
 
 func main() {
-	if len(os.Args) > 1 {
-		os.Exit(runCLI(os.Args[1:]))
-	}
+	os.Exit(runCLI(os.Args[1:], runTUI))
+}
 
-	p := tea.NewProgram(initialModel(), tea.WithAltScreen())
-	if _, err := p.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "lazysvn failed: %v\n", err)
-		os.Exit(1)
+func runTUI() int {
+	m := initialModel()
+	path, configErr := sortOrderPath()
+	if configErr == nil {
+		m.sortOrder = loadSortOrder(path)
 	}
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	result, err := p.Run()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "lazysvn failed: %v\n", err)
+		return 1
+	}
+	if configErr == nil {
+		configErr = saveSortOrder(path, result.(model).sortOrder)
+	}
+	if configErr != nil {
+		fmt.Fprintf(os.Stderr, "lazysvn could not save sort order: %v\n", configErr)
+	}
+	return 0
 }
 
 func isHelpArg(s string) bool {
 	return s == "-h" || s == "--help" || s == "help"
 }
 
-// runCLI handles non-TUI subcommands and returns the process exit code.
-func runCLI(args []string) int {
+func runCLI(args []string, openTUI func() int) int {
+	if len(args) == 0 {
+		return openTUI()
+	}
+
 	switch cmd := args[0]; {
 	case isHelpArg(cmd):
 		fmt.Println(cliHelp())
@@ -82,8 +98,21 @@ func runCLI(args []string) int {
 		}
 		return 0
 	default:
-		fmt.Fprintf(os.Stderr, "unknown argument: %s\n\n%s\n", cmd, cliHelp())
-		return 2
+		if cmd == "--" {
+			args = args[1:]
+		} else if strings.HasPrefix(cmd, "-") {
+			fmt.Fprintf(os.Stderr, "unknown option: %s\n\n%s\n", cmd, cliHelp())
+			return 2
+		}
+		if len(args) != 1 {
+			fmt.Fprintf(os.Stderr, "expected exactly one directory path\n\n%s\n", cliHelp())
+			return 2
+		}
+		if err := os.Chdir(args[0]); err != nil {
+			fmt.Fprintf(os.Stderr, "lazysvn: %v\n", err)
+			return 1
+		}
+		return openTUI()
 	}
 }
 
@@ -92,8 +121,12 @@ func helpText() string {
 LazySVN keys:
   j/k or arrows  Move
   g / G          Top / Bottom
+  Tab            Toggle path/status sort (M, then A first)
   space          Mark/unmark file
-  esc            Clear all marks
+  Shift+V        Select a range of visible files with the movement keys
+                 Shift+V or Space marks the range, Esc cancels it
+  /              Edit filters at the bottom of Changes (status first, Tab for path)
+  esc            Clear filter, or clear marks if no filter is active
   d or Enter     Diff selected file (follows the cursor)
   l              Show recent log (20 entries) for selected file
   c              Commit marked files (or current file)
@@ -102,6 +135,7 @@ LazySVN keys:
   u              svn update
   r              Refresh status
   h or ?         Show help
+  mouse wheel    Scroll the pane under the pointer
   q / ctrl+c     Quit
 	`)
 }
@@ -113,11 +147,15 @@ LazySVN
 A LazyGit-style terminal UI for Subversion (SVN).
 
 Usage:
-  lazysvn
+  lazysvn [path]
+  lazysvn -- <path>
   lazysvn --version
   lazysvn update [tag]
   lazysvn uninstall
   lazysvn --help
+
+Open the SVN working copy at path, or use the current directory by default.
+Use -- before a path that starts with a dash or matches a command name.
 
 Command:
   version      Show lazysvn version

@@ -205,9 +205,43 @@ func newDiffDoc(raw []string) *diffDoc {
 
 const diffSeparator = " | "
 
+// diffSideBySide reports whether d is drawn as paired columns at width: a
+// real hunk plus room for two columns. The renderer uses the same rule.
+func diffSideBySide(d *diffDoc, width int) bool {
+	leftW := (width - len(diffSeparator)) / 2
+	rightW := width - len(diffSeparator) - leftW
+	return d.hasHunk && leftW >= 18 && rightW >= 18
+}
+
+// diffRows reports how many rows d has to scroll through at width and how many
+// of the first ones are pinned header rows (the OLD/NEW labels in the
+// side-by-side layout).
+func diffRows(d *diffDoc, width int) (total, pinned int) {
+	if d == nil || len(d.lines) == 0 {
+		return 1, 0
+	}
+	if !diffSideBySide(d, width) {
+		return len(d.lines), 0
+	}
+	return len(d.rows), 2
+}
+
+// diffMaxOffset is the largest scroll offset that still fills maxRows rows.
+func diffMaxOffset(d *diffDoc, width, maxRows int) int {
+	total, pinned := diffRows(d, width)
+	visible := max(0, maxRows-pinned)
+	return max(0, total-visible)
+}
+
 // renderDiff draws at most maxRows lines of d, side by side when there is
 // room, else unified.
 func renderDiff(d *diffDoc, width, maxRows int) []string {
+	return renderDiffAt(d, width, maxRows, 0)
+}
+
+// renderDiffAt draws maxRows lines of d starting at scroll offset. Side-by-side
+// output keeps its two header rows pinned, so offset counts data rows only.
+func renderDiffAt(d *diffDoc, width, maxRows, offset int) []string {
 	if maxRows <= 0 {
 		return nil
 	}
@@ -216,19 +250,22 @@ func renderDiff(d *diffDoc, width, maxRows int) []string {
 	}
 	leftW := (width - len(diffSeparator)) / 2
 	rightW := width - len(diffSeparator) - leftW
-	if !d.hasHunk || leftW < 18 || rightW < 18 {
-		return renderUnified(d.lines, width, maxRows)
+	if !diffSideBySide(d, width) {
+		return renderUnifiedAt(d.lines, width, maxRows, offset)
 	}
+
+	off := clamp(offset, 0, diffMaxOffset(d, width, maxRows))
+	bodyRows := max(0, maxRows-2)
 
 	out := make([]string, 0, maxRows)
 	out = append(out,
 		diffHeadStyle.Render(formatDiffRow(leftW, rightW, diffCell{text: "OLD"}, diffCell{text: "NEW"}, false)),
 		diffSepStyle.Render(truncate(strings.Repeat("-", leftW)+diffSeparator+strings.Repeat("-", rightW), width)),
 	)
-	for _, r := range d.rows {
-		if len(out) >= maxRows {
-			break
-		}
+	if len(out) > maxRows {
+		return out[:maxRows]
+	}
+	for _, r := range d.rows[min(off, len(d.rows)):min(len(d.rows), off+bodyRows)] {
 		switch {
 		case r.pair:
 			out = append(out, formatDiffRow(leftW, rightW, r.left, r.right, true))
@@ -241,9 +278,14 @@ func renderDiff(d *diffDoc, width, maxRows int) []string {
 	return out[:min(len(out), maxRows)]
 }
 
-func renderUnified(lines []diffLine, width, maxRows int) []string {
-	out := make([]string, 0, min(len(lines), maxRows))
-	for _, l := range lines[:min(len(lines), maxRows)] {
+// renderUnifiedAt draws maxRows unified lines starting at scroll offset.
+func renderUnifiedAt(lines []diffLine, width, maxRows, offset int) []string {
+	if maxRows <= 0 {
+		return nil
+	}
+	off := clamp(offset, 0, max(0, len(lines)-maxRows))
+	out := make([]string, 0, min(len(lines)-off, maxRows))
+	for _, l := range lines[off:min(len(lines), off+maxRows)] {
 		text := l.text
 		switch l.kind {
 		case diffContext:

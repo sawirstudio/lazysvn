@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -421,8 +423,83 @@ func TestVersionIgnoresCurrentDirectory(t *testing.T) {
 }
 
 func TestUpdateRejectsOptions(t *testing.T) {
-	if code := runCLI([]string{"update", "--force"}); code != 2 {
+	if code := runCLI([]string{"update", "--force"}, nil); code != 2 {
 		t.Errorf("exit = %d, want 2", code)
+	}
+}
+
+func TestCLIOpensWorkingDirectory(t *testing.T) {
+	root := t.TempDir()
+	for _, dir := range []string{"product", "work copy", "update", "-product"} {
+		if err := os.Mkdir(filepath.Join(root, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, tc := range []struct {
+		name string
+		args []string
+		dir  string
+	}{
+		{"current directory", nil, "."},
+		{"relative path", []string{"product"}, "product"},
+		{"absolute path with spaces", []string{filepath.Join(root, "work copy")}, "work copy"},
+		{"command name as path", []string{"--", "update"}, "update"},
+		{"dash-prefixed path", []string{"--", "-product"}, "-product"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Chdir(root)
+			want, err := os.Stat(filepath.Join(root, tc.dir))
+			if err != nil {
+				t.Fatal(err)
+			}
+			opened := false
+			code := runCLI(tc.args, func() int {
+				opened = true
+				got, err := os.Stat(".")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !os.SameFile(got, want) {
+					cwd, _ := os.Getwd()
+					t.Errorf("TUI opened in %q, want %q", cwd, filepath.Join(root, tc.dir))
+				}
+				return 0
+			})
+			if code != 0 || !opened {
+				t.Errorf("exit = %d, TUI opened = %v", code, opened)
+			}
+		})
+	}
+}
+
+func TestCLIRejectsInvalidDirectoryArguments(t *testing.T) {
+	root := t.TempDir()
+	file := filepath.Join(root, "file.txt")
+	if err := os.WriteFile(file, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		args []string
+		code int
+	}{
+		{"missing directory", []string{filepath.Join(root, "missing")}, 1},
+		{"file path", []string{file}, 1},
+		{"extra path", []string{root, root}, 2},
+		{"missing path after --", []string{"--"}, 2},
+		{"unknown option", []string{"--unknown"}, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code := runCLI(tc.args, func() int {
+				t.Fatal("opened TUI with invalid arguments")
+				return 1
+			})
+			if code != tc.code {
+				t.Errorf("exit = %d, want %d", code, tc.code)
+			}
+		})
 	}
 }
 
@@ -819,5 +896,295 @@ func TestRenderDiffDrawsOnlyWhatFits(t *testing.T) {
 		if got := len(renderDiff(doc, width, 40)); got != 40 {
 			t.Errorf("width %d: rendered %d rows, want 40", width, got)
 		}
+	}
+}
+
+// ---- mouse scrolling ------------------------------------------------------
+
+func wheelMsg(button tea.MouseButton, x, y int) tea.MouseMsg {
+	return tea.MouseMsg{X: x, Y: y, Button: button, Action: tea.MouseActionPress}
+}
+
+func wheel(t *testing.T, m model, button tea.MouseButton, x, y int) model {
+	t.Helper()
+	next, _ := m.Update(wheelMsg(button, x, y))
+	return next.(model)
+}
+
+func numberedEntries(n int) []statusEntry {
+	entries := make([]statusEntry, n)
+	for i := range entries {
+		entries[i] = statusEntry{Code: 'M', Path: fmt.Sprintf("f%02d", i)}
+	}
+	return entries
+}
+
+// diffPreviewModel is a wide (left/right) model whose preview holds a 60-pair
+// side-by-side diff, so there is more content than the pane can show.
+func diffPreviewModel(t *testing.T) model {
+	t.Helper()
+	raw := []string{"Index: a", "===", "--- a\t(revision 1)", "+++ a\t(working copy)", "@@ -1,60 +1,60 @@"}
+	for i := 1; i <= 60; i++ {
+		raw = append(raw, fmt.Sprintf("-%02d old", i), fmt.Sprintf("+%02d new", i))
+	}
+	m := loaded(numberedEntries(10)...)
+	m.preview = preview{kind: previewDiff, title: "Diff: a", path: "a", diff: newDiffDoc(raw)}
+	return m
+}
+
+func TestWheelOverListMovesCursor(t *testing.T) {
+	m := loaded(numberedEntries(10)...)
+	l := m.layout()
+	x, y := l.changes.rect.x+2, l.changes.rect.y+2
+
+	m = wheel(t, m, tea.MouseButtonWheelDown, x, y)
+	if m.cursor != wheelStep {
+		t.Errorf("cursor = %d, want %d", m.cursor, wheelStep)
+	}
+	if m.preview.scroll != 0 {
+		t.Errorf("list wheel moved the preview: scroll = %d", m.preview.scroll)
+	}
+	m = wheel(t, m, tea.MouseButtonWheelUp, x, y)
+	if m.cursor != 0 {
+		t.Errorf("cursor = %d after wheel up, want 0", m.cursor)
+	}
+
+	// The border belongs to the pane, so the last column of the list still
+	// scrolls the list rather than falling through to the preview.
+	m = wheel(t, m, tea.MouseButtonWheelDown, l.changes.rect.x+l.changes.rect.w-1, y)
+	if m.cursor != wheelStep {
+		t.Errorf("wheel on the border moved cursor to %d, want %d", m.cursor, wheelStep)
+	}
+}
+
+func TestWheelOverPreviewScrollsDiff(t *testing.T) {
+	m := diffPreviewModel(t)
+	l := m.layout()
+	x, y := l.preview.rect.x+2, l.preview.rect.y+2
+
+	m = wheel(t, m, tea.MouseButtonWheelDown, x, y)
+	m = wheel(t, m, tea.MouseButtonWheelDown, x, y)
+	if m.preview.scroll != 2*wheelStep {
+		t.Fatalf("scroll = %d, want %d", m.preview.scroll, 2*wheelStep)
+	}
+	if m.cursor != 0 {
+		t.Errorf("preview wheel moved the cursor to %d", m.cursor)
+	}
+
+	view := m.View()
+	if !strings.Contains(view, "OLD") || !strings.Contains(view, "NEW") {
+		t.Error("diff header scrolled away; it should stay pinned")
+	}
+	if strings.Contains(view, "- 01 old") {
+		t.Error("first diff row still visible after scrolling")
+	}
+	if !strings.Contains(view, "- 02 old") {
+		t.Errorf("expected the row after the scroll offset, got:\n%s", view)
+	}
+
+	m = wheel(t, m, tea.MouseButtonWheelUp, x, y)
+	m = wheel(t, m, tea.MouseButtonWheelUp, x, y)
+	if m.preview.scroll != 0 {
+		t.Errorf("scroll = %d after wheel up, want 0", m.preview.scroll)
+	}
+	if !strings.Contains(m.View(), "- 01 old") {
+		t.Error("first diff row missing after scrolling back to the top")
+	}
+}
+
+func TestWheelScrollClampedToContent(t *testing.T) {
+	m := diffPreviewModel(t)
+	l := m.layout()
+	x, y := l.preview.rect.x+2, l.preview.rect.y+2
+
+	for i := 0; i < 100; i++ {
+		m = wheel(t, m, tea.MouseButtonWheelDown, x, y)
+	}
+	want := diffMaxOffset(m.preview.diff, l.preview.textWidth(), m.previewBodyRows())
+	if m.preview.scroll != want {
+		t.Errorf("scroll = %d, want clamped max %d", m.preview.scroll, want)
+	}
+	if got := len(strings.Split(m.View(), "\n")); got != m.height-2 {
+		t.Errorf("view has %d lines at max scroll, want %d", got, m.height-2)
+	}
+
+	for i := 0; i < 100; i++ {
+		m = wheel(t, m, tea.MouseButtonWheelUp, x, y)
+	}
+	if m.preview.scroll != 0 {
+		t.Errorf("scroll = %d after scrolling up past the top, want 0", m.preview.scroll)
+	}
+}
+
+func TestWheelOutsidePanesIgnored(t *testing.T) {
+	m := diffPreviewModel(t)
+	l := m.layout()
+
+	for _, pt := range [][2]int{
+		{l.preview.rect.x + 2, 0},                                   // header
+		{l.preview.rect.x + 2, m.height - 1},                        // footer
+		{l.preview.rect.x + l.preview.rect.w, l.preview.rect.y + 2}, // right of everything
+	} {
+		next := wheel(t, m, tea.MouseButtonWheelDown, pt[0], pt[1])
+		if next.cursor != m.cursor || next.preview.scroll != m.preview.scroll {
+			t.Errorf("wheel at (%d,%d) changed state: cursor %d->%d scroll %d->%d",
+				pt[0], pt[1], m.cursor, next.cursor, m.preview.scroll, next.preview.scroll)
+		}
+	}
+}
+
+func TestWheelIgnoresNonWheelButtons(t *testing.T) {
+	m := diffPreviewModel(t)
+	l := m.layout()
+	x, y := l.preview.rect.x+2, l.preview.rect.y+2
+	next := wheel(t, m, tea.MouseButtonLeft, x, y)
+	if next.preview.scroll != 0 || next.cursor != 0 {
+		t.Errorf("left click changed state: cursor=%d scroll=%d", next.cursor, next.preview.scroll)
+	}
+}
+
+func TestWheelInStackedLayout(t *testing.T) {
+	m := diffPreviewModel(t)
+	m.width, m.height = 80, 30
+	l := m.layout()
+	if !l.stacked {
+		t.Fatal("80 columns should use the stacked layout")
+	}
+
+	m = wheel(t, m, tea.MouseButtonWheelDown, l.preview.rect.x+2, l.preview.rect.y+2)
+	if m.preview.scroll != wheelStep {
+		t.Errorf("preview scroll = %d, want %d", m.preview.scroll, wheelStep)
+	}
+	if m.cursor != 0 {
+		t.Errorf("preview wheel moved the cursor to %d", m.cursor)
+	}
+
+	m = wheel(t, m, tea.MouseButtonWheelDown, l.changes.rect.x+2, l.changes.rect.y+2)
+	if m.cursor != wheelStep {
+		t.Errorf("cursor = %d, want %d", m.cursor, wheelStep)
+	}
+}
+
+func TestWheelScrollsTextPreview(t *testing.T) {
+	m := loaded(numberedEntries(2)...)
+	lines := make([]string, 0, 80)
+	for i := 1; i <= 80; i++ {
+		lines = append(lines, fmt.Sprintf("log line %02d", i))
+	}
+	m.preview = preview{kind: previewLog, title: "Log: a"}.withText(strings.Join(lines, "\n"))
+
+	l := m.layout()
+	m = wheel(t, m, tea.MouseButtonWheelDown, l.preview.rect.x+2, l.preview.rect.y+2)
+	if m.preview.scroll != wheelStep {
+		t.Fatalf("scroll = %d, want %d", m.preview.scroll, wheelStep)
+	}
+	view := m.View()
+	if strings.Contains(view, "log line 01") {
+		t.Error("first text row still visible after scrolling")
+	}
+	if !strings.Contains(view, "log line 04") {
+		t.Error("text preview did not scroll to the next rows")
+	}
+}
+
+// TestLayoutMatchesRenderedPanes pins the mouse hit boxes to what View
+// actually draws: if the two ever drift, wheel events land on the wrong pane.
+func TestLayoutMatchesRenderedPanes(t *testing.T) {
+	m := diffPreviewModel(t)
+	for _, size := range [][2]int{{120, 40}, {132, 50}, {80, 30}, {40, 20}} {
+		m.width, m.height = size[0], size[1]
+		l := m.layout()
+
+		changes := m.renderChangesPane(l.changes)
+		preview := m.renderPreviewPane(l.preview)
+		if got, want := lipgloss.Width(changes), l.changes.rect.w; got != want {
+			t.Errorf("%dx%d: list pane renders %d columns, rect says %d", size[0], size[1], got, want)
+		}
+		if got, want := lipgloss.Height(changes), l.changes.rect.h; got != want {
+			t.Errorf("%dx%d: list pane renders %d rows, rect says %d", size[0], size[1], got, want)
+		}
+		if got, want := lipgloss.Width(preview), l.preview.rect.w; got != want {
+			t.Errorf("%dx%d: preview pane renders %d columns, rect says %d", size[0], size[1], got, want)
+		}
+		if got, want := lipgloss.Height(preview), l.preview.rect.h; got != want {
+			t.Errorf("%dx%d: preview pane renders %d rows, rect says %d", size[0], size[1], got, want)
+		}
+		if l.stacked {
+			if got, want := l.changes.rect.y+l.changes.rect.h, l.preview.rect.y; got != want {
+				t.Errorf("%dx%d: preview starts at row %d, want %d", size[0], size[1], got, want)
+			}
+		} else if got, want := l.changes.rect.x+l.changes.rect.w, l.preview.rect.x; got != want {
+			t.Errorf("%dx%d: preview starts at column %d, want %d", size[0], size[1], got, want)
+		}
+	}
+}
+
+func TestWheelIgnoredInCommitMode(t *testing.T) {
+	m := loaded(numberedEntries(4)...)
+	m, _ = press(t, m, "c")
+	if m.mode != modeCommit {
+		t.Fatal("commit prompt did not open")
+	}
+	next := wheel(t, m, tea.MouseButtonWheelDown, m.width-4, 10)
+	if next.preview.scroll != m.preview.scroll || next.cursor != m.cursor {
+		t.Error("wheel scrolled while the commit prompt was open")
+	}
+}
+
+func TestPreviewScrollResetsOnNewPreview(t *testing.T) {
+	m := diffPreviewModel(t)
+	l := m.layout()
+	m = wheel(t, m, tea.MouseButtonWheelDown, l.preview.rect.x+2, l.preview.rect.y+2)
+	if m.preview.scroll == 0 {
+		t.Fatal("setup: preview did not scroll")
+	}
+	m = m.onPreview(previewMsg{
+		seq:    m.previewSeq,
+		kind:   previewLog,
+		path:   "a",
+		result: svnResult{args: []string{"log"}, stdout: "r1 | one\n"},
+	})
+	if m.preview.scroll != 0 {
+		t.Errorf("new preview started at scroll %d, want 0", m.preview.scroll)
+	}
+}
+
+func TestPreviewScrollAfterResize(t *testing.T) {
+	m := diffPreviewModel(t)
+	l := m.layout()
+	for i := 0; i < 20; i++ {
+		m = wheel(t, m, tea.MouseButtonWheelDown, l.preview.rect.x+2, l.preview.rect.y+2)
+	}
+
+	m.height = 12 // shrink: the old offset no longer fits
+	view := m.View()
+	if view == "" {
+		t.Fatal("empty view after resize")
+	}
+	l = m.layout()
+	for i := 0; i < 100; i++ {
+		m = wheel(t, m, tea.MouseButtonWheelDown, l.preview.rect.x+2, l.preview.rect.y+2)
+	}
+	if got, want := m.preview.scroll, diffMaxOffset(m.preview.diff, l.preview.textWidth(), m.previewBodyRows()); got != want {
+		t.Errorf("scroll = %d after resize, want %d", got, want)
+	}
+}
+
+func TestRenderDiffAtClampsOffset(t *testing.T) {
+	doc := diffPreviewModel(t).preview.diff
+	for _, off := range []int{-100, 0, 3, 10_000} {
+		if got := len(renderDiffAt(doc, 80, 20, off)); got > 20 {
+			t.Errorf("offset %d: %d rows, want at most 20", off, got)
+		}
+	}
+	if !slices.Equal(renderDiff(doc, 80, 20), renderDiffAt(doc, 80, 20, -5)) {
+		t.Error("negative offsets should render the top page")
+	}
+	last := renderDiffAt(doc, 80, 20, 10_000)
+	if got := len(last); got != 20 {
+		t.Errorf("past-the-end offset rendered %d rows, want a full 20-row page", got)
+	}
+	if !strings.Contains(strings.Join(last, "\n"), "- 60 old") {
+		t.Error("last page does not reach the end of the diff")
 	}
 }
